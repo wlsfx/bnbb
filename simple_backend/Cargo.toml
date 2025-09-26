@@ -1,0 +1,30 @@
+[package]
+name = "simple-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1.0"
+tiny_http = "0.12.0"
+serde = { version = "1.0", features = ["derive"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1"] }
+r2d2 = "0.8"
+r2d2_postgres = "0.18"
+rust_decimal = { version = "1.0", features = ["serde"] }
+url = "2.0"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+# Web3 and BNB Smart Chain connectivity
+ethers = { version = "2.0", features = ["rustls", "ws"] }
+tokio = { version = "1.0", features = ["full"] }
+hex = "0.4"
+secp256k1 = { version = "0.27", features = ["rand-std"] }
+rand = "0.8"
+# Network optimization and proxy support
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "socks"] }
+retry = "2.0"
+async-trait = "0.1"
+backoff = { version = "0.4", features = ["tokio"] }
+anyhow = "1.0"
