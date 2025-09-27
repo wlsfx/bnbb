@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { useRealTimeUpdates } from './use-real-time';
 
 export interface WebSocketMessage {
   type: string;
@@ -318,9 +319,12 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   };
 }
 
-// Hook specifically for real-time updates (replaces useRealTimeUpdates)
+// Hook specifically for real-time updates (includes backend status tracking)
 export function useRealTimeWebSocket() {
   const queryClient = useQueryClient();
+  
+  // Use the real-time updates hook to track backend connection status
+  useRealTimeUpdates();
   
   const websocket = useWebSocket({
     enabled: true,

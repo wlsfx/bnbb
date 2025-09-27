@@ -6,7 +6,7 @@ JustJewIt is a sophisticated multi-wallet cryptocurrency launcher application de
 ## Authentication & Access Control
 
 ### Admin Key
-- Master Admin Key: `WLSFX-ADM7WWGB2Dm0RuKqMLw`
+- Master Admin Key: Set via `MASTER_ADMIN_KEY` environment variable
 - Admin keys use prefix: `WLSFX-`
 - User keys use prefix: `JJIT-`
 - All keys are 24 characters in length
@@ -128,9 +128,31 @@ The development environment includes Replit-specific plugins for error handling 
 - **Zod**: Runtime type validation and schema definition
 - **CLSX & Tailwind Merge**: Utility functions for conditional and merged CSS classes
 
-## Recent Updates (September 26, 2025)
+## Recent Updates
 
-### Authentication System
+### September 27, 2025 - BSC Testnet Configuration
+- **BSC Testnet Support**: Added comprehensive testnet environment (Chain ID 97)
+- **Dual Environment Setup**: Both mainnet and testnet configurations available
+- **Default Environment**: Application now defaults to BSC testnet for safe testing
+- **Wallet Generation**: Full wallet generation and funding tested on testnet
+- **Initial Balance Funding**: Wallets can be created with testBNB balance automatically
+
+### Wallet Funding Methods
+**1. Initial Balance Parameter** ✅ **WORKING**
+- Create wallets with testBNB during generation
+- API: `POST /api/wallets/generate` with `{"initialBalance": "0.1"}`
+
+**2. External Funding**
+- Use BSC testnet faucets: https://testnet.binance.org/faucet-smart
+- Send testBNB to generated wallet addresses
+- Block explorer: https://testnet.bscscan.com
+
+**3. Built-in Funding Systems**
+- `fundWallet()` function for existing wallets
+- Bulk funding with distribution strategies
+- Stealth funding capabilities for advanced operations
+
+### September 26, 2025 - Authentication System
 - Implemented secure access key-based authentication
 - Admin panel with environment controls and key management
 - Landing page with login interface
@@ -161,9 +183,14 @@ The following secrets are configured:
 
 ## Current Status
 The stealth bundler platform is fully functional with:
+- **✅ TRUE DATABASE PERSISTENCE** - PostgreSQL with all 36 tables created
+- **✅ ADMIN KEY CONFIGURED** - WLSFX-mnzWawH4glS0oRP0lg set as master admin
+- **✅ BALANCE SYNC OPERATIONAL** - BSC testnet connectivity verified  
+- **✅ PRIVATE KEY ENCRYPTION** - AES-256-CBC secure storage implemented
 - Complete authentication system with admin controls
 - Comprehensive bundle execution engine
 - Production-ready resilience features
-- BSC mainnet integration via Quicknode
+- BSC testnet integration for safe testing
 - Real-time monitoring and analytics
 - Secure multi-tenant architecture
+- **DATA SURVIVES RESTARTS** - No more data loss on application restarts

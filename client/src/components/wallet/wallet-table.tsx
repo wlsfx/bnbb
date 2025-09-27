@@ -4,12 +4,13 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Eye, Edit, Trash2, RefreshCw, Copy, Check, DollarSign, Activity } from 'lucide-react';
+import { Eye, Edit, Trash2, RefreshCw, Copy, Check, DollarSign, Activity, ArrowDownLeft, Crown } from 'lucide-react';
 import { useWalletStore } from '../../stores/wallet-store';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow } from 'date-fns';
 import { useToast } from '@/hooks/use-toast';
 import { apiRequest } from '@/lib/queryClient';
+import type { Wallet } from '@shared/schema';
 
 const getStatusColor = (status: string) => {
   switch (status) {
@@ -41,27 +42,37 @@ export function WalletTable() {
   const walletsPerPage = 10;
 
   // Fetch wallets data
-  const { data: wallets = [], isLoading, refetch, isRefetching } = useQuery({
+  const { data: wallets = [], isLoading, refetch, isRefetching } = useQuery<Wallet[]>({
     queryKey: ['/api/wallets'],
   });
+  
+  // Find master wallet
+  const masterWallet = wallets.find((w) => 
+    w.label?.toLowerCase().includes('master') || w.id === wallets[0]?.id
+  );
+  const masterBalance = parseFloat(masterWallet?.balance || '0');
 
   // Sync balance mutation
   const syncBalancesMutation = useMutation({
     mutationFn: async () => {
       const response = await apiRequest('POST', '/api/wallets/sync-balances');
-      return response.json();
+      if (!response.ok) {
+        throw new Error(`Failed to sync: ${response.statusText}`);
+      }
+      return await response.json();
     },
     onSuccess: (data) => {
       toast({
         title: 'Balances Synced',
-        description: `Updated ${data.updatedCount} wallet balances`,
+        description: `Updated ${data?.updatedCount || wallets.length} wallet balances successfully`,
       });
       queryClient.invalidateQueries({ queryKey: ['/api/wallets'] });
     },
-    onError: () => {
+    onError: (error) => {
+      console.error('Sync error details:', error);
       toast({
         title: 'Sync Failed',
-        description: 'Failed to sync wallet balances',
+        description: 'Failed to sync wallet balances. Please check network connection.',
         variant: 'destructive',
       });
     },
@@ -71,7 +82,10 @@ export function WalletTable() {
   const getBalanceMutation = useMutation({
     mutationFn: async (walletId: string) => {
       const response = await apiRequest('GET', `/api/wallets/${walletId}/balance`);
-      return response.json();
+      if (!response.ok) {
+        throw new Error(`Failed to get balance: ${response.statusText}`);
+      }
+      return await response.json();
     },
     onSuccess: (data, walletId) => {
       toast({
@@ -87,9 +101,39 @@ export function WalletTable() {
       });
     },
   });
+  
+  // Fund from master mutation
+  const fundFromMasterMutation = useMutation({
+    mutationFn: async ({ walletId, amount }: { walletId: string; amount: string }) => {
+      const response = await apiRequest('POST', '/api/bulk-funding', {
+        sourceWallet: masterWallet!.id,
+        targetStrategy: 'selected',
+        fundingStrategy: 'even',
+        totalAmount: amount,
+        targetWallets: [walletId],
+        batchSize: 1,
+        delayBetweenBatches: 100
+      });
+      return response.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: 'Wallet Funded',
+        description: `Successfully funded wallet from master`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/wallets'] });
+    },
+    onError: () => {
+      toast({
+        title: 'Funding Failed',
+        description: 'Insufficient master wallet balance or funding error',
+        variant: 'destructive',
+      });
+    },
+  });
 
   // Calculate total balance
-  const totalBalance = wallets.reduce((sum, wallet) => {
+  const totalBalance = wallets.reduce((sum: number, wallet: Wallet) => {
     return sum + parseFloat(wallet.balance || '0');
   }, 0).toFixed(8);
 
@@ -175,7 +219,7 @@ export function WalletTable() {
                   </TableCell>
                 </TableRow>
               )}
-              {currentWallets.map((wallet, index) => (
+              {currentWallets.map((wallet: Wallet, index: number) => (
                 <TableRow 
                   key={wallet.id} 
                   className="hover:bg-muted/50 transition-colors"
@@ -191,7 +235,12 @@ export function WalletTable() {
                       )}>
                         W{(startIndex + index + 1).toString().padStart(2, '0')}
                       </div>
-                      <span className="font-medium">{wallet.label || `Wallet #${wallet.id.slice(0, 6)}`}</span>
+                      <span className="font-medium">
+                        {wallet.label || `Wallet #${wallet.id.slice(0, 6)}`}
+                        {wallet.id === masterWallet?.id && (
+                          <Crown className="w-3 h-3 ml-1 inline text-amber-500" />
+                        )}
+                      </span>
                     </div>
                   </TableCell>
                   
@@ -247,15 +296,25 @@ export function WalletTable() {
                       >
                         <Activity className="w-4 h-4" />
                       </Button>
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        className="h-8 w-8 text-muted-foreground hover:text-success"
-                        title="Fund Wallet"
-                        data-testid={`button-fund-${wallet.id}`}
-                      >
-                        <DollarSign className="w-4 h-4" />
-                      </Button>
+                      {wallet.id !== masterWallet?.id && masterBalance >= 0.01 ? (
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          className="h-8 w-8 text-muted-foreground hover:text-success"
+                          onClick={() => fundFromMasterMutation.mutate({ walletId: wallet.id, amount: '0.01' })}
+                          disabled={fundFromMasterMutation.isPending}
+                          title="Fund 0.01 BNB from Master"
+                          data-testid={`button-fund-from-master-${wallet.id}`}
+                        >
+                          <ArrowDownLeft className="w-4 h-4" />
+                        </Button>
+                      ) : wallet.id === masterWallet?.id ? (
+                        <Badge variant="secondary" className="text-xs px-2 py-1">
+                          Master
+                        </Badge>
+                      ) : (
+                        <div className="w-8 h-8" />
+                      )}
                       <Button 
                         variant="ghost" 
                         size="icon" 

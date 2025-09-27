@@ -1,7 +1,8 @@
 import { Button } from '@/components/ui/button';
-import { AlertTriangle, Plus, Server, Coins, Wallet } from 'lucide-react';
+import { AlertTriangle, LogOut, Server, Coins, Wallet, Crown } from 'lucide-react';
 import { useSystemStore } from '../../stores/system-store';
 import { useWalletStore } from '../../stores/wallet-store';
+import { apiRequest } from '@/lib/queryClient';
 import { cn } from '@/lib/utils';
 
 export function TopBar() {
@@ -9,6 +10,34 @@ export function TopBar() {
   const { wallets } = useWalletStore();
 
   const activeWalletCount = wallets.filter(w => w.status === 'active').length;
+  const masterWallet = wallets.find(w => w.label?.includes('Master Wallet'));
+
+  const handleLogout = async () => {
+    try {
+      await apiRequest('POST', '/api/auth/logout');
+      // Redirect to login page
+      window.location.href = '/';
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
+  };
+
+  const handleCreateMasterWallet = async () => {
+    try {
+      console.log('Creating master wallet...');
+      const response = await apiRequest('POST', '/api/wallets/generate', {
+        count: 1,
+        labelPrefix: "Master Wallet"
+        // No initialBalance - wallet starts with real 0 BNB balance
+      });
+      console.log('Master wallet created successfully:', response);
+      // Force a refresh of wallet data
+      window.location.reload();
+    } catch (error) {
+      console.error('Failed to create master wallet:', error);
+      alert('Failed to create master wallet. Please try again.');
+    }
+  };
 
   return (
     <div className="bg-card border-b border-border p-4 flex items-center justify-between">
@@ -54,13 +83,15 @@ export function TopBar() {
           Emergency Stop
         </Button>
         
+        
         <Button 
-          className="bg-primary text-primary-foreground hover:bg-primary/90 shadow-lg shadow-primary/30"
+          onClick={handleLogout}
+          variant="outline"
           size="sm"
-          data-testid="button-generate-wallets"
+          data-testid="button-logout"
         >
-          <Plus className="w-4 h-4 mr-2" />
-          Generate Wallets
+          <LogOut className="w-4 h-4 mr-2" />
+          Logout
         </Button>
       </div>
     </div>

@@ -189,6 +189,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Debug endpoint to test BSC connectivity and balance fetching
+  app.get("/api/debug/balance/:address", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { address } = req.params;
+      
+      console.log(`🔍 Debug: Testing balance fetch for address: ${address}`);
+      
+      // Test BSC client initialization
+      await bscClient.waitForInitialization();
+      const currentEnv = bscClient.getCurrentEnvironment();
+      console.log(`🔍 Debug: Current environment:`, currentEnv);
+      
+      // Test balance fetching directly
+      const balance = await bscClient.getBalance(address);
+      console.log(`🔍 Debug: Balance fetched: ${balance} BNB`);
+      
+      // Test health check
+      const healthCheck = await bscClient.healthCheck();
+      console.log(`🔍 Debug: Health check:`, healthCheck);
+      
+      res.json({
+        success: true,
+        address,
+        balance,
+        environment: currentEnv,
+        healthCheck,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('🔍 Debug: Balance fetch error:', error);
+      res.status(500).json({ 
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
+    }
+  });
+
   // Wallet routes (user-scoped)
   app.get("/api/wallets", requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -221,10 +259,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/wallets/generate", requireAuth, async (req: AuthRequest, res) => {
     try {
       const accessKeyId = req.session!.accessKeyId!;
-      const { label, initialBalance, useMnemonic } = req.body;
+      const { label, labelPrefix, initialBalance, useMnemonic } = req.body;
+      const walletLabel = labelPrefix || label; // Support both labelPrefix and label
       
       const wallet = await walletService.createWallet(accessKeyId, {
-        labelPrefix: label,
+        labelPrefix: walletLabel,
         initialBalance,
         mnemonic: useMnemonic ? undefined : undefined // Auto-generate if not provided
       });
@@ -237,12 +276,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         status: "confirmed",
       });
 
-      // Broadcast wallet update via WebSocket
+      // Broadcast wallet update via WebSocket if available
       const sanitizedWallet = walletService.sanitizeWalletForResponse(wallet);
-      webSocketService.broadcastWalletUpdate(sanitizedWallet, accessKeyId);
-      
-      // Broadcast activity update via WebSocket
-      webSocketService.broadcastActivityUpdate(activity, accessKeyId);
+      if (app.locals?.services?.webSocketService) {
+        app.locals.services.webSocketService.broadcastWalletUpdate(sanitizedWallet, accessKeyId);
+        // Broadcast activity update via WebSocket
+        app.locals.services.webSocketService.broadcastActivityUpdate(activity, accessKeyId);
+      }
 
       res.status(201).json(sanitizedWallet);
     } catch (error) {
@@ -1291,16 +1331,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Network Status and Health Check
   app.get("/api/network/status", async (req, res) => {
     try {
+      await bscClient.waitForInitialization();
+      const currentEnv = bscClient.getCurrentEnvironment();
       const [networkHealth, proxyHealth] = await Promise.all([
         bscClient.healthCheck(),
         Promise.resolve(proxyService.getHealthMetrics())
       ]);
 
       res.json({
+        connected: networkHealth.isConnected,
+        environment: currentEnv?.environment || 'testnet',
+        chainId: currentEnv?.chainId || 97,
+        network: currentEnv?.environment === 'mainnet' ? 'BSC Mainnet' : 'BSC Testnet',
         blockchain: {
           ...networkHealth,
-          chainId: 56,
-          network: 'BSC Mainnet',
+          chainId: currentEnv?.chainId || 97,
+          network: currentEnv?.environment === 'mainnet' ? 'BSC Mainnet' : 'BSC Testnet',
         },
         proxy: proxyHealth,
         services: {
@@ -1314,6 +1360,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       res.status(500).json({ 
         message: "Failed to get network status",
+        error: error instanceof Error ? error.message : "Unknown error"
+      });
+    }
+  });
+
+  // Network Switch Endpoint
+  app.post("/api/network/switch", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { environment } = req.body;
+      
+      if (!environment || !['testnet', 'mainnet'].includes(environment)) {
+        return res.status(400).json({ 
+          success: false,
+          message: "Invalid environment. Must be 'testnet' or 'mainnet'" 
+        });
+      }
+
+      // Switch active environment
+      await storage.switchActiveEnvironment(environment);
+      
+      // Reload blockchain client with new configuration
+      await bscClient.reloadEnvironment();
+      
+      // Get updated environment info
+      const currentEnv = bscClient.getCurrentEnvironment();
+      
+      res.json({ 
+        success: true,
+        message: `Switched to ${environment}`,
+        environment: currentEnv?.environment || environment,
+        chainId: currentEnv?.chainId || (environment === 'mainnet' ? 56 : 97),
+        network: environment === 'mainnet' ? 'BSC Mainnet' : 'BSC Testnet'
+      });
+      
+    } catch (error) {
+      console.error('Failed to switch network:', error);
+      res.status(500).json({ 
+        success: false,
+        message: "Failed to switch network",
         error: error instanceof Error ? error.message : "Unknown error"
       });
     }

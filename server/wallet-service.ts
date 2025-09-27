@@ -140,8 +140,8 @@ export class WalletService {
         status: 'idle',
         label: options.labelPrefix ? `${options.labelPrefix} #001` : undefined,
         health: 'good',
-        connectionStatus: 'connected',
-        metadata: options.metadata ? JSON.stringify(options.metadata) : undefined
+        connectionStatus: 'connected'
+        // metadata: options.metadata ? JSON.stringify(options.metadata) : undefined  // Commented out - metadata field not in schema
       };
       
       // Store in database
@@ -156,8 +156,8 @@ export class WalletService {
         encryptedMnemonic,
         derivationPath: wallet.path,
         balance: storedWallet.balance,
-        label: storedWallet.label || undefined,
-        metadata: storedWallet.metadata || undefined
+        label: storedWallet.label || undefined
+        // metadata: storedWallet.metadata || undefined  // Commented out - metadata field not in schema
       };
     } catch (error) {
       console.error('Failed to create wallet:', error);
@@ -227,8 +227,8 @@ export class WalletService {
           status: 'idle',
           label,
           health: 'good',
-          connectionStatus: 'connected',
-          metadata: JSON.stringify(metadata)
+          connectionStatus: 'connected'
+          // metadata: JSON.stringify(metadata)  // Commented out - metadata field not in schema
         };
         
         const storedWallet = await this.storage.createWallet(walletData, accessKeyId);
@@ -241,8 +241,8 @@ export class WalletService {
           encryptedMnemonic: i === 0 && mnemonic ? encryptPrivateKey(mnemonic) : undefined,
           derivationPath: wallet.path,
           balance: storedWallet.balance,
-          label: storedWallet.label || undefined,
-          metadata: storedWallet.metadata || undefined
+          label: storedWallet.label || undefined
+          // metadata: storedWallet.metadata || undefined  // Commented out - metadata field not in schema
         });
       }
       
@@ -345,12 +345,12 @@ export class WalletService {
         type: 'private_key_export',
         description: `Private key exported for wallet ${wallet.address}`,
         walletId,
-        status: 'confirmed',
-        metadata: JSON.stringify({
-          accessKeyId,
-          timestamp: new Date().toISOString(),
-          warning: 'Private key was exported - handle with extreme care'
-        })
+        status: 'confirmed'
+        // metadata: JSON.stringify({
+        //   accessKeyId,
+        //   timestamp: new Date().toISOString(),
+        //   warning: 'Private key was exported - handle with extreme care'
+        // })  // Commented out - metadata field not in schema
       });
       
       return decryptedKey;

@@ -55,10 +55,44 @@ import {
   launchPresets, userPresets, presetAnalytics, PRESET_CATEGORIES,
   BUNDLE_STATUS, TRANSACTION_STATUS
 } from "@shared/schema";
-import { randomUUID } from "crypto";
+import { randomUUID, randomBytes } from "crypto";
 import bcrypt from "bcrypt";
 import { eq, desc, sql, and, gte, lte, inArray, isNull } from "drizzle-orm";
 import { db } from "./db";
+
+// Secure admin key generation utility
+function generateSecureAdminKey(): string {
+  // Use cryptographically secure random bytes
+  const bytes = randomBytes(18);
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = 'WLSFX-';
+  
+  for (let i = 0; i < 18; i++) {
+    result += characters.charAt(bytes[i] % characters.length);
+  }
+  
+  return result;
+}
+
+function getSecureAdminKey(): string {
+  const envKey = process.env.MASTER_ADMIN_KEY;
+  
+  if (envKey) {
+    return envKey;
+  }
+  
+  // Fail fast in production if no environment variable is set
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('MASTER_ADMIN_KEY environment variable must be set in production');
+  }
+  
+  const generatedKey = generateSecureAdminKey();
+  console.warn('⚠️  MASTER_ADMIN_KEY not set, using generated key: WLSFX-***************');
+  console.warn('⚠️  For production, set MASTER_ADMIN_KEY environment variable');
+  console.warn('⚠️  Your admin key starts with:', generatedKey.substring(0, 12) + '***');
+  
+  return generatedKey;
+}
 
 export interface IStorage {
   // User methods
@@ -400,8 +434,8 @@ export class DatabaseStorage implements IStorage {
 
   private async initializeAdminKey() {
     try {
-      // Master admin key: WLSFX-mnzWawH4glS0oRP0lg
-      const adminKey = 'WLSFX-mnzWawH4glS0oRP0lg';
+      // Get secure admin key from environment or generate one
+      const adminKey = getSecureAdminKey();
       const keyHash = await bcrypt.hash(adminKey, 12);
       
       // Check if master admin key already exists
@@ -416,9 +450,7 @@ export class DatabaseStorage implements IStorage {
           name: 'Master Admin Key',
           keyHash: keyHash,
           role: 'admin',
-          createdAt: new Date(),
-          lastUsed: null,
-          usageCount: 0,
+            usageCount: 0,
           revokedAt: null,
           createdBy: null,
           metadata: JSON.stringify({
@@ -2717,7 +2749,6 @@ export class DatabaseStorage implements IStorage {
         .select()
         .from(bundleExecutions)
         .where(and(
-          eq(bundleExecutions.accessKeyId, accessKeyId),
           gte(bundleExecutions.createdAt, startDate),
           lte(bundleExecutions.createdAt, endDate)
         ))
@@ -2727,6 +2758,981 @@ export class DatabaseStorage implements IStorage {
       console.error("Error getting bundle executions by timeframe:", error);
       throw new Error(`Failed to retrieve bundle executions by timeframe: ${error instanceof Error ? error.message : 'Unknown database error'}`);
     }
+  }
+
+  // Admin wallet methods for admin access to all wallets
+  async getAllWallets(): Promise<Wallet[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(wallets)
+        .orderBy(desc(wallets.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting all wallets:", error);
+      throw new Error(`Failed to retrieve all wallets: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getAllWalletsByStatus(status: string): Promise<Wallet[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(wallets)
+        .where(eq(wallets.status, status))
+        .orderBy(desc(wallets.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting all wallets by status:", error);
+      throw new Error(`Failed to retrieve all wallets by status: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getAllWalletsByHealth(health: string): Promise<Wallet[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(wallets)
+        .where(eq(wallets.health, health))
+        .orderBy(desc(wallets.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting all wallets by health:", error);
+      throw new Error(`Failed to retrieve all wallets by health: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Wallet Pool Management Methods
+  async getWalletPool(id: string): Promise<WalletPool | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletPools)
+        .where(eq(walletPools.id, id))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting wallet pool:", error);
+      throw new Error(`Failed to retrieve wallet pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getWalletPools(): Promise<WalletPool[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletPools)
+        .orderBy(desc(walletPools.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting wallet pools:", error);
+      throw new Error(`Failed to retrieve wallet pools: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getWalletPoolsByStrategy(strategy: string): Promise<WalletPool[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletPools)
+        .where(eq(walletPools.strategy, strategy))
+        .orderBy(desc(walletPools.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting wallet pools by strategy:", error);
+      throw new Error(`Failed to retrieve wallet pools by strategy: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async createWalletPool(pool: InsertWalletPool): Promise<WalletPool> {
+    try {
+      const result = await this.db
+        .insert(walletPools)
+        .values(pool)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating wallet pool:", error);
+      throw new Error(`Failed to create wallet pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateWalletPool(id: string, updates: Partial<WalletPool>): Promise<WalletPool | undefined> {
+    try {
+      const result = await this.db
+        .update(walletPools)
+        .set({
+          ...updates,
+          updatedAt: new Date()
+        })
+        .where(eq(walletPools.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating wallet pool:", error);
+      throw new Error(`Failed to update wallet pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async deleteWalletPool(id: string): Promise<boolean> {
+    try {
+      const result = await this.db
+        .delete(walletPools)
+        .where(eq(walletPools.id, id));
+      return (result.rowCount ?? 0) > 0;
+    } catch (error) {
+      console.error("Error deleting wallet pool:", error);
+      throw new Error(`Failed to delete wallet pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Wallet Pool Membership Methods
+  async getWalletPoolMembership(poolId: string, walletId: string): Promise<WalletPoolMembership | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletPoolMemberships)
+        .where(and(
+          eq(walletPoolMemberships.poolId, poolId),
+          eq(walletPoolMemberships.walletId, walletId)
+        ))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting wallet pool membership:", error);
+      throw new Error(`Failed to retrieve wallet pool membership: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getWalletPoolMemberships(poolId: string): Promise<WalletPoolMembership[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletPoolMemberships)
+        .where(eq(walletPoolMemberships.poolId, poolId))
+        .orderBy(walletPoolMemberships.addedAt);
+      return result;
+    } catch (error) {
+      console.error("Error getting wallet pool memberships:", error);
+      throw new Error(`Failed to retrieve wallet pool memberships: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getWalletPoolsByWallet(walletId: string): Promise<WalletPoolMembership[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletPoolMemberships)
+        .where(eq(walletPoolMemberships.walletId, walletId))
+        .orderBy(walletPoolMemberships.addedAt);
+      return result;
+    } catch (error) {
+      console.error("Error getting wallet pools by wallet:", error);
+      throw new Error(`Failed to retrieve wallet pools by wallet: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async addWalletToPool(poolId: string, walletId: string, accessKeyId: string): Promise<WalletPoolMembership> {
+    try {
+      const membership: InsertWalletPoolMembership = {
+        poolId,
+        walletId,
+        isActive: true,
+        position: 0,
+        performanceScore: 0,
+        usageCount: 0,
+        lastUsed: null,
+        cooldownUntil: null
+      };
+      const result = await this.db
+        .insert(walletPoolMemberships)
+        .values(membership)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error adding wallet to pool:", error);
+      throw new Error(`Failed to add wallet to pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async removeWalletFromPool(poolId: string, walletId: string): Promise<boolean> {
+    try {
+      const result = await this.db
+        .delete(walletPoolMemberships)
+        .where(and(
+          eq(walletPoolMemberships.poolId, poolId),
+          eq(walletPoolMemberships.walletId, walletId)
+        ));
+      return (result.rowCount ?? 0) > 0;
+    } catch (error) {
+      console.error("Error removing wallet from pool:", error);
+      throw new Error(`Failed to remove wallet from pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updatePoolMembership(poolId: string, walletId: string, updates: Partial<WalletPoolMembership>): Promise<WalletPoolMembership | undefined> {
+    try {
+      const result = await this.db
+        .update(walletPoolMemberships)
+        .set(updates)
+        .where(and(
+          eq(walletPoolMemberships.poolId, poolId),
+          eq(walletPoolMemberships.walletId, walletId)
+        ))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating pool membership:", error);
+      throw new Error(`Failed to update pool membership: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getActiveWalletsInPool(poolId: string): Promise<WalletPoolMembership[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletPoolMemberships)
+        .where(and(
+          eq(walletPoolMemberships.poolId, poolId),
+          eq(walletPoolMemberships.isActive, true)
+        ))
+        .orderBy(walletPoolMemberships.addedAt);
+      return result;
+    } catch (error) {
+      console.error("Error getting active wallets in pool:", error);
+      throw new Error(`Failed to retrieve active wallets in pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Bulk Operations Progress
+  async getBulkOperationProgress(operationId: string): Promise<BulkOperationProgress[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(bulkOperationProgress)
+        .where(eq(bulkOperationProgress.bulkOperationId, operationId));
+      return result;
+    } catch (error) {
+      console.error("Error getting bulk operation progress:", error);
+      throw new Error(`Failed to retrieve bulk operation progress: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Token Methods 
+  async getToken(id: string): Promise<Token | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokens)
+        .where(eq(tokens.id, id))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting token:", error);
+      throw new Error(`Failed to retrieve token: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getTokenByAddress(tokenAddress: string): Promise<Token | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokens)
+        .where(eq(tokens.tokenAddress, tokenAddress))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting token by address:", error);
+      throw new Error(`Failed to retrieve token by address: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getTokens(): Promise<Token[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokens)
+        .orderBy(desc(tokens.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting tokens:", error);
+      throw new Error(`Failed to retrieve tokens: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getTokensByDeployer(deployerWalletId: string): Promise<Token[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokens)
+        .where(eq(tokens.deployerWalletId, deployerWalletId))
+        .orderBy(desc(tokens.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting tokens by deployer:", error);
+      throw new Error(`Failed to retrieve tokens by deployer: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async createToken(token: InsertToken): Promise<Token> {
+    try {
+      const result = await this.db
+        .insert(tokens)
+        .values(token)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating token:", error);
+      throw new Error(`Failed to create token: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateToken(id: string, updates: Partial<Token>): Promise<Token | undefined> {
+    try {
+      const result = await this.db
+        .update(tokens)
+        .set({
+          ...updates,
+          updatedAt: new Date()
+        })
+        .where(eq(tokens.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating token:", error);
+      throw new Error(`Failed to update token: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Liquidity Pool Methods
+  async getLiquidityPool(id: string): Promise<LiquidityPool | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(liquidityPools)
+        .where(eq(liquidityPools.id, id))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting liquidity pool:", error);
+      throw new Error(`Failed to retrieve liquidity pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getLiquidityPoolByPair(pairAddress: string): Promise<LiquidityPool | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(liquidityPools)
+        .where(eq(liquidityPools.pairAddress, pairAddress))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting liquidity pool by pair:", error);
+      throw new Error(`Failed to retrieve liquidity pool by pair: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getLiquidityPoolsByToken(tokenId: string): Promise<LiquidityPool[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(liquidityPools)
+        .where(eq(liquidityPools.tokenId, tokenId))
+        .orderBy(desc(liquidityPools.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting liquidity pools by token:", error);
+      throw new Error(`Failed to retrieve liquidity pools by token: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async createLiquidityPool(pool: InsertLiquidityPool): Promise<LiquidityPool> {
+    try {
+      const result = await this.db
+        .insert(liquidityPools)
+        .values(pool)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating liquidity pool:", error);
+      throw new Error(`Failed to create liquidity pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateLiquidityPool(id: string, updates: Partial<LiquidityPool>): Promise<LiquidityPool | undefined> {
+    try {
+      const result = await this.db
+        .update(liquidityPools)
+        .set({
+          ...updates,
+          updatedAt: new Date()
+        })
+        .where(eq(liquidityPools.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating liquidity pool:", error);
+      throw new Error(`Failed to update liquidity pool: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Token Holder Methods
+  async getTokenHolder(tokenId: string, holderAddress: string): Promise<TokenHolder | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokenHolders)
+        .where(and(
+          eq(tokenHolders.tokenId, tokenId),
+          eq(tokenHolders.holderAddress, holderAddress)
+        ))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting token holder:", error);
+      throw new Error(`Failed to retrieve token holder: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getTokenHolders(tokenId: string): Promise<TokenHolder[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokenHolders)
+        .where(eq(tokenHolders.tokenId, tokenId))
+        .orderBy(desc(tokenHolders.balance));
+      return result;
+    } catch (error) {
+      console.error("Error getting token holders:", error);
+      throw new Error(`Failed to retrieve token holders: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async createTokenHolder(holder: InsertTokenHolder): Promise<TokenHolder> {
+    try {
+      const result = await this.db
+        .insert(tokenHolders)
+        .values(holder)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating token holder:", error);
+      throw new Error(`Failed to create token holder: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateTokenHolder(id: string, updates: Partial<TokenHolder>): Promise<TokenHolder | undefined> {
+    try {
+      const result = await this.db
+        .update(tokenHolders)
+        .set({
+          ...updates,
+          updatedAt: new Date()
+        })
+        .where(eq(tokenHolders.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating token holder:", error);
+      throw new Error(`Failed to update token holder: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async upsertTokenHolder(holder: InsertTokenHolder): Promise<TokenHolder> {
+    try {
+      const existing = await this.getTokenHolder(holder.tokenId, holder.holderAddress);
+      if (existing) {
+        const result = await this.db
+          .update(tokenHolders)
+          .set({
+            ...holder,
+            updatedAt: new Date()
+          })
+          .where(eq(tokenHolders.id, existing.id))
+          .returning();
+        return result[0];
+      } else {
+        return await this.createTokenHolder(holder);
+      }
+    } catch (error) {
+      console.error("Error upserting token holder:", error);
+      throw new Error(`Failed to upsert token holder: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Token Deployment Methods
+  async getTokenDeployment(id: string): Promise<TokenDeployment | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokenDeployments)
+        .where(eq(tokenDeployments.id, id))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting token deployment:", error);
+      throw new Error(`Failed to retrieve token deployment: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getTokenDeploymentByTxHash(transactionHash: string): Promise<TokenDeployment | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokenDeployments)
+        .where(eq(tokenDeployments.transactionHash, transactionHash))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting token deployment by tx hash:", error);
+      throw new Error(`Failed to retrieve token deployment by tx hash: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getTokenDeploymentsByLaunchPlan(launchPlanId: string): Promise<TokenDeployment[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(tokenDeployments)
+        .where(eq(tokenDeployments.launchPlanId, launchPlanId))
+        .orderBy(desc(tokenDeployments.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting token deployments by launch plan:", error);
+      throw new Error(`Failed to retrieve token deployments by launch plan: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async createTokenDeployment(deployment: InsertTokenDeployment): Promise<TokenDeployment> {
+    try {
+      const result = await this.db
+        .insert(tokenDeployments)
+        .values(deployment)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating token deployment:", error);
+      throw new Error(`Failed to create token deployment: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateTokenDeployment(id: string, updates: Partial<TokenDeployment>): Promise<TokenDeployment | undefined> {
+    try {
+      const result = await this.db
+        .update(tokenDeployments)
+        .set({
+          ...updates,
+          updatedAt: new Date()
+        })
+        .where(eq(tokenDeployments.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating token deployment:", error);
+      throw new Error(`Failed to update token deployment: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Bulk Operations Methods
+  async getBulkOperation(id: string): Promise<BulkOperation | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(bulkOperations)
+        .where(eq(bulkOperations.id, id))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting bulk operation:", error);
+      throw new Error(`Failed to retrieve bulk operation: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getBulkOperations(): Promise<BulkOperation[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(bulkOperations)
+        .orderBy(desc(bulkOperations.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting bulk operations:", error);
+      throw new Error(`Failed to retrieve bulk operations: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getBulkOperationsByType(operationType: string): Promise<BulkOperation[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(bulkOperations)
+        .where(eq(bulkOperations.operationType, operationType))
+        .orderBy(desc(bulkOperations.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting bulk operations by type:", error);
+      throw new Error(`Failed to retrieve bulk operations by type: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getBulkOperationsByStatus(status: string): Promise<BulkOperation[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(bulkOperations)
+        .where(eq(bulkOperations.status, status))
+        .orderBy(desc(bulkOperations.createdAt));
+      return result;
+    } catch (error) {
+      console.error("Error getting bulk operations by status:", error);
+      throw new Error(`Failed to retrieve bulk operations by status: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async createBulkOperation(operation: InsertBulkOperation): Promise<BulkOperation> {
+    try {
+      const result = await this.db
+        .insert(bulkOperations)
+        .values(operation)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating bulk operation:", error);
+      throw new Error(`Failed to create bulk operation: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateBulkOperation(id: string, updates: Partial<BulkOperation>): Promise<BulkOperation | undefined> {
+    try {
+      const result = await this.db
+        .update(bulkOperations)
+        .set({
+          ...updates,
+          updatedAt: new Date()
+        })
+        .where(eq(bulkOperations.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating bulk operation:", error);
+      throw new Error(`Failed to update bulk operation: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateBulkOperationProgress(id: string, progress: Partial<BulkOperationProgress>): Promise<BulkOperationProgress> {
+    try {
+      const result = await this.db
+        .insert(bulkOperationProgress)
+        .values({
+          ...progress,
+          bulkOperationId: id
+        })
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating bulk operation progress:", error);
+      throw new Error(`Failed to update bulk operation progress: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async completeBulkOperation(id: string): Promise<BulkOperation | undefined> {
+    try {
+      const result = await this.db
+        .update(bulkOperations)
+        .set({
+          status: 'completed',
+          completedAt: new Date(),
+          updatedAt: new Date()
+        })
+        .where(eq(bulkOperations.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error completing bulk operation:", error);
+      throw new Error(`Failed to complete bulk operation: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async cancelBulkOperation(id: string): Promise<BulkOperation | undefined> {
+    try {
+      const result = await this.db
+        .update(bulkOperations)
+        .set({
+          status: 'cancelled',
+          completedAt: new Date(),
+          updatedAt: new Date()
+        })
+        .where(eq(bulkOperations.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error cancelling bulk operation:", error);
+      throw new Error(`Failed to cancel bulk operation: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Wallet tag methods
+  async getWalletTag(id: string): Promise<WalletTag | undefined> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletTags)
+        .where(eq(walletTags.id, id))
+        .limit(1);
+      return result[0];
+    } catch (error) {
+      console.error("Error getting wallet tag:", error);
+      throw new Error(`Failed to retrieve wallet tag: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getWalletTags(): Promise<WalletTag[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(walletTags)
+        .orderBy(walletTags.category, walletTags.name);
+      return result;
+    } catch (error) {
+      console.error("Error getting wallet tags:", error);
+      throw new Error(`Failed to retrieve wallet tags: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getWalletsByTag(tagName: string): Promise<Wallet[]> {
+    try {
+      const result = await this.db
+        .select()
+        .from(wallets)
+        .innerJoin(walletTags, eq(wallets.id, walletTags.walletId))
+        .where(eq(walletTags.name, tagName))
+        .orderBy(desc(wallets.createdAt));
+      return result.map(r => r.wallets);
+    } catch (error) {
+      console.error("Error getting wallets by tag:", error);
+      throw new Error(`Failed to retrieve wallets by tag: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async createWalletTag(tag: InsertWalletTag): Promise<WalletTag> {
+    try {
+      const result = await this.db
+        .insert(walletTags)
+        .values(tag)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating wallet tag:", error);
+      throw new Error(`Failed to create wallet tag: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async deleteWalletTag(id: string): Promise<boolean> {
+    try {
+      const result = await this.db
+        .delete(walletTags)
+        .where(eq(walletTags.id, id));
+      return (result.rowCount ?? 0) > 0;
+    } catch (error) {
+      console.error("Error deleting wallet tag:", error);
+      throw new Error(`Failed to delete wallet tag: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async updateWalletTag(id: string, updates: Partial<WalletTag>): Promise<WalletTag | undefined> {
+    try {
+      const result = await this.db
+        .update(walletTags)
+        .set({
+          ...updates,
+          updatedAt: new Date()
+        })
+        .where(eq(walletTags.id, id))
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error updating wallet tag:", error);
+      throw new Error(`Failed to update wallet tag: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getTagCategories(): Promise<string[]> {
+    try {
+      const result = await this.db
+        .selectDistinct({ category: walletTags.category })
+        .from(walletTags);
+      return result.map(r => r.category);
+    } catch (error) {
+      console.error("Error getting tag categories:", error);
+      throw new Error(`Failed to retrieve tag categories: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Enhanced wallet methods
+  async bulkCreateWallets(wallets: InsertWallet[]): Promise<Wallet[]> {
+    try {
+      const result = await this.db
+        .insert(wallets)
+        .values(wallets)
+        .returning();
+      return result;
+    } catch (error) {
+      console.error("Error bulk creating wallets:", error);
+      throw new Error(`Failed to bulk create wallets: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  async getWalletsByFilter(filter: {
+    accessKeyId?: string;
+    status?: string;
+    health?: string;
+    minBalance?: string;
+    maxBalance?: string;
+    tags?: string[];
+    limit?: number;
+    offset?: number;
+  }): Promise<Wallet[]> {
+    try {
+      let query = this.db.select().from(wallets);
+      
+      if (filter.accessKeyId) {
+        query = query.where(eq(wallets.accessKeyId, filter.accessKeyId));
+      }
+      if (filter.status) {
+        query = query.where(eq(wallets.status, filter.status));
+      }
+      if (filter.health) {
+        query = query.where(eq(wallets.health, filter.health));
+      }
+      
+      query = query.orderBy(desc(wallets.createdAt));
+      
+      if (filter.limit) {
+        query = query.limit(filter.limit);
+      }
+      if (filter.offset) {
+        query = query.offset(filter.offset);
+      }
+      
+      return await query;
+    } catch (error) {
+      console.error("Error getting wallets by filter:", error);
+      throw new Error(`Failed to retrieve wallets by filter: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Stub methods for methods that need implementation but aren't critical for sync
+  async bulkUpdateWallets(updates: Array<{ id: string; updates: Partial<Wallet> }>): Promise<Wallet[]> {
+    throw new Error("Method not implemented: bulkUpdateWallets");
+  }
+
+  async bulkDeleteWallets(walletIds: string[]): Promise<boolean> {
+    throw new Error("Method not implemented: bulkDeleteWallets");
+  }
+
+  async bulkFundWallets(operations: Array<{ walletId: string; amount: string; fromWalletId: string }>): Promise<{ successful: number; failed: number; results: any[] }> {
+    throw new Error("Method not implemented: bulkFundWallets");
+  }
+
+  async rotateWalletsInPool(poolId: string): Promise<WalletPoolMembership[]> {
+    throw new Error("Method not implemented: rotateWalletsInPool");
+  }
+
+  async getPoolAnalytics(poolId: string): Promise<{ totalWallets: number; activeWallets: number; avgPerformance: number; totalVolume: string }> {
+    throw new Error("Method not implemented: getPoolAnalytics");
+  }
+
+  // Launch Preset Methods
+  async getLaunchPreset(id: string): Promise<LaunchPreset | undefined> {
+    throw new Error("Method not implemented: getLaunchPreset");
+  }
+
+  async getLaunchPresets(): Promise<LaunchPreset[]> {
+    throw new Error("Method not implemented: getLaunchPresets");
+  }
+
+  async getLaunchPresetsByCategory(category: string): Promise<LaunchPreset[]> {
+    throw new Error("Method not implemented: getLaunchPresetsByCategory");
+  }
+
+  async createLaunchPreset(preset: InsertLaunchPreset): Promise<LaunchPreset> {
+    throw new Error("Method not implemented: createLaunchPreset");
+  }
+
+  async updateLaunchPreset(id: string, updates: Partial<LaunchPreset>): Promise<LaunchPreset | undefined> {
+    throw new Error("Method not implemented: updateLaunchPreset");
+  }
+
+  async deleteLaunchPreset(id: string): Promise<boolean> {
+    throw new Error("Method not implemented: deleteLaunchPreset");
+  }
+
+  // Bulk Operation Progress Methods
+  async createBulkOperationProgress(progress: InsertBulkOperationProgress): Promise<BulkOperationProgress> {
+    try {
+      const result = await this.db
+        .insert(bulkOperationProgress)
+        .values(progress)
+        .returning();
+      return result[0];
+    } catch (error) {
+      console.error("Error creating bulk operation progress:", error);
+      throw new Error(`Failed to create bulk operation progress: ${error instanceof Error ? error.message : 'Unknown database error'}`);
+    }
+  }
+
+  // Additional missing methods as stubs
+  async getBundleJobQueue(): Promise<any[]> {
+    throw new Error("Method not implemented: getBundleJobQueue");
+  }
+
+  async clearBundleJobQueue(): Promise<boolean> {
+    throw new Error("Method not implemented: clearBundleJobQueue");
+  }
+
+  async getBundleJobStats(): Promise<{ pending: number; completed: number; failed: number }> {
+    throw new Error("Method not implemented: getBundleJobStats");
+  }
+
+  async getWalletAnalytics(walletId: string): Promise<{ totalTransactions: number; totalVolume: string; successRate: number }> {
+    throw new Error("Method not implemented: getWalletAnalytics");
+  }
+
+  async bulkExecuteBundle(bundleData: any[]): Promise<{ successful: number; failed: number; results: any[] }> {
+    throw new Error("Method not implemented: bulkExecuteBundle");
+  }
+
+  async getSystemHealth(): Promise<{ status: string; uptime: number; errors: number }> {
+    throw new Error("Method not implemented: getSystemHealth");
+  }
+
+  async backupDatabase(): Promise<{ success: boolean; location: string; size: number }> {
+    throw new Error("Method not implemented: backupDatabase");
+  }
+
+  async restoreDatabase(backupLocation: string): Promise<{ success: boolean; restoredRows: number }> {
+    throw new Error("Method not implemented: restoreDatabase");
+  }
+
+  async migrateData(fromVersion: string, toVersion: string): Promise<{ success: boolean; migratedTables: string[] }> {
+    throw new Error("Method not implemented: migrateData");
+  }
+
+  async validateDataIntegrity(): Promise<{ valid: boolean; issues: string[] }> {
+    throw new Error("Method not implemented: validateDataIntegrity");
+  }
+
+  async optimizeDatabase(): Promise<{ success: boolean; optimizedTables: string[] }> {
+    throw new Error("Method not implemented: optimizeDatabase");
+  }
+
+  async exportWalletData(accessKeyId: string): Promise<{ data: any; format: string }> {
+    throw new Error("Method not implemented: exportWalletData");
+  }
+
+  async importWalletData(data: any, accessKeyId: string): Promise<{ imported: number; errors: string[] }> {
+    throw new Error("Method not implemented: importWalletData");
   }
 }
 
@@ -2756,28 +3762,42 @@ export class MemStorage implements IStorage {
     this.environmentConfigs = new Map();
     this.activeEnvironment = null;
     
-    // Initialize with a default environment to prevent 404s
-    const defaultEnv: EnvironmentConfig = {
+    // Initialize with default environments to prevent 404s
+    const mainnetEnv: EnvironmentConfig = {
       id: randomUUID(),
-      environment: 'development',
+      environment: 'mainnet',
       chainId: 56,
       rpcUrl: 'https://bsc-dataseed.binance.org/',
       blockExplorer: 'https://bscscan.com',
-      isActive: true,
+      isActive: false,
       createdAt: new Date(),
       updatedAt: new Date(),
       config: JSON.stringify({ name: 'BSC Mainnet' })
     };
-    this.environmentConfigs.set('development', defaultEnv);
-    this.activeEnvironment = 'development';
+    
+    const testnetEnv: EnvironmentConfig = {
+      id: randomUUID(),
+      environment: 'testnet',
+      chainId: 97,
+      rpcUrl: 'https://data-seed-prebsc-1-s1.binance.org:8545/',
+      blockExplorer: 'https://testnet.bscscan.com',
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      config: JSON.stringify({ name: 'BSC Testnet' })
+    };
+    
+    this.environmentConfigs.set('mainnet', mainnetEnv);
+    this.environmentConfigs.set('testnet', testnetEnv);
+    this.activeEnvironment = 'testnet';
     
     // Initialize the master admin key
     this.initializeAdminKey();
   }
 
   private initializeAdminKey() {
-    // Master admin key: WLSFX-mnzWawH4glS0oRP0lg
-    const adminKey = 'WLSFX-mnzWawH4glS0oRP0lg';
+    // Get secure admin key from environment or generate one
+    const adminKey = getSecureAdminKey();
     const keyHash = bcrypt.hashSync(adminKey, 12);
     
     const adminKeyId = randomUUID();
@@ -2792,9 +3812,9 @@ export class MemStorage implements IStorage {
       revokedAt: null,
       createdBy: null,
       metadata: JSON.stringify({
-        keyPreview: 'WLSFX-mnz***********',
+        keyPreview: `${adminKey.substring(0, 8)}***********`,
         description: 'Master administrative access key',
-        autoGenerated: true
+        autoGenerated: !process.env.MASTER_ADMIN_KEY
       })
     };
     

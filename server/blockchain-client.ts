@@ -323,6 +323,7 @@ export class BSCClient extends EventEmitter {
 
   private createNonceManager(): NonceManager {
     const nonceCache = new Map<string, number>();
+    const provider = this.provider; // Capture provider reference
 
     return {
       async getNonce(address: string): Promise<number> {
@@ -331,7 +332,7 @@ export class BSCClient extends EventEmitter {
         }
 
         try {
-          const onChainNonce = await this.provider.getTransactionCount(address, 'pending');
+          const onChainNonce = await provider.getTransactionCount(address, 'pending');
           nonceCache.set(address, onChainNonce);
           return onChainNonce;
         } catch (error) {
@@ -594,7 +595,7 @@ export class BSCClient extends EventEmitter {
         nonce: txResponse.nonce,
         gasPrice: txResponse.gasPrice?.toString() || '0',
         gasLimit: Number(txResponse.gasLimit),
-        to: txResponse.to,
+        to: txResponse.to || undefined,
         value: txResponse.value?.toString() || '0',
         data: txResponse.data,
         chainId: this.config.chainId,
@@ -628,17 +629,17 @@ export class BSCClient extends EventEmitter {
   // Cleanup method
   destroy(): void {
     // Clear all WebSocket subscriptions
-    for (const [key, subscription] of this.wsSubscriptions) {
+    this.wsSubscriptions.forEach((subscription, key) => {
       if (subscription && typeof subscription.unsubscribe === 'function') {
         subscription.unsubscribe();
       }
-    }
+    });
     this.wsSubscriptions.clear();
 
     // Clear pending transaction timeouts
-    for (const [hash, { timeout }] of this.pendingTransactions) {
+    this.pendingTransactions.forEach(({ timeout }, hash) => {
       clearTimeout(timeout);
-    }
+    });
     this.pendingTransactions.clear();
 
     // Close WebSocket provider

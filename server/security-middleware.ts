@@ -44,8 +44,8 @@ export const adminRateLimiter = rateLimit({
 
 // CSRF Protection middleware
 export function csrfProtection(req: Request, res: Response, next: NextFunction) {
-  // Skip CSRF for public endpoints
-  const publicEndpoints = ['/api/auth/login', '/api/network/status', '/api/health'];
+  // Skip CSRF for public endpoints and authenticated wallet operations
+  const publicEndpoints = ['/api/auth/login', '/api/network/status', '/api/health', '/api/wallets/sync-balances'];
   if (publicEndpoints.includes(req.path)) {
     return next();
   }

@@ -9,11 +9,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useToast } from '@/hooks/use-toast';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiRequest } from '@/lib/queryClient';
 import { Globe, Database, Shield, Cpu, Save, RefreshCw, AlertCircle } from 'lucide-react';
 
 export default function EnvironmentConfig() {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [isSaving, setIsSaving] = useState(false);
+  const [switching, setSwitching] = useState(false);
   
   // Network Configuration
   const [networkConfig, setNetworkConfig] = useState({
@@ -65,6 +69,55 @@ export default function EnvironmentConfig() {
         description: `${configType} configuration has been updated successfully`,
       });
     }, 1000);
+  };
+
+  // Network switching mutation
+  const switchNetworkMutation = useMutation({
+    mutationFn: async (environment: 'testnet' | 'mainnet') => {
+      const response = await apiRequest('POST', '/api/network/switch', { environment });
+      if (!response.ok) {
+        throw new Error(`Failed to switch network: ${response.statusText}`);
+      }
+      return response.json();
+    },
+    onSuccess: (data, environment) => {
+      // Update network config to reflect the switch
+      const newConfig = {
+        ...networkConfig,
+        chainId: environment === 'testnet' ? 97 : 56,
+        rpcUrl: environment === 'testnet' 
+          ? 'https://data-seed-prebsc-1-s1.binance.org:8545'
+          : 'https://bsc-dataseed1.binance.org',
+        wsUrl: environment === 'testnet'
+          ? 'wss://testnet-ws-node.binance.org'
+          : 'wss://bsc-ws-node.nariox.org'
+      };
+      setNetworkConfig(newConfig);
+      
+      toast({
+        title: 'Network Switched',
+        description: `Successfully switched to ${environment === 'testnet' ? 'BSC Testnet' : 'BSC Mainnet'}`,
+      });
+      
+      // Invalidate all network-related queries
+      queryClient.invalidateQueries({ queryKey: ['/api/network/status'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/wallets'] });
+      setSwitching(false);
+    },
+    onError: (error) => {
+      console.error('Network switch error:', error);
+      toast({
+        title: 'Network Switch Failed',
+        description: 'Failed to switch network. Please try again.',
+        variant: 'destructive',
+      });
+      setSwitching(false);
+    },
+  });
+
+  const switchEnvironment = (environment: 'testnet' | 'mainnet') => {
+    setSwitching(true);
+    switchNetworkMutation.mutate(environment);
   };
 
   return (
@@ -169,6 +222,47 @@ export default function EnvironmentConfig() {
                   Save Network Configuration
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Quick Environment Switch */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Network Environment</CardTitle>
+              <CardDescription>
+                Quickly switch between mainnet and testnet environments
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex gap-2">
+                <Button 
+                  variant={networkConfig.chainId === 97 ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => switchEnvironment('testnet')}
+                  disabled={switching}
+                  data-testid="button-switch-testnet"
+                >
+                  {switching && networkConfig.chainId === 97 ? "Switching..." : "BSC Testnet"}
+                </Button>
+                <Button 
+                  variant={networkConfig.chainId === 56 ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => switchEnvironment('mainnet')}
+                  disabled={switching}
+                  data-testid="button-switch-mainnet"
+                >
+                  {switching && networkConfig.chainId === 56 ? "Switching..." : "BSC Mainnet"}
+                </Button>
+              </div>
+              <div className="text-sm text-muted-foreground">
+                <strong>Current Network:</strong> {networkConfig.chainId === 97 ? 'BSC Testnet (Chain ID: 97)' : networkConfig.chainId === 56 ? 'BSC Mainnet (Chain ID: 56)' : 'Unknown'}
+              </div>
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>
+                  Switching networks will update all blockchain connections and reload wallet data.
+                </AlertDescription>
+              </Alert>
             </CardContent>
           </Card>
         </TabsContent>

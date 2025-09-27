@@ -1,12 +1,7 @@
 // Tab navigation removed - using sidebar navigation instead
+import { MasterWalletStatus } from '../components/wallet/master-wallet-status';
 import { WalletGenerationPanel } from '../components/wallet/wallet-generation-panel';
-import { FundingPanel } from '../components/wallet/funding-panel';
 import { WalletTable } from '../components/wallet/wallet-table';
-import { RealTimeMonitor } from '../components/monitoring/real-time-monitor';
-import { SystemStats } from '../components/monitoring/system-stats';
-import { FundingMetricsMonitor } from '../components/monitoring/funding-metrics-monitor';
-import { WalletStatusMonitor } from '../components/monitoring/wallet-status-monitor';
-import { EnvironmentControlPanel } from '../components/monitoring/environment-control-panel';
 import { useRealTimeWebSocket } from '../hooks/useWebSocket';
 import { Badge } from '@/components/ui/badge';
 import { Wifi, WifiOff, AlertCircle } from 'lucide-react';
@@ -34,7 +29,7 @@ export default function Dashboard() {
       return (
         <Badge variant="destructive" className="text-red-600 bg-red-100 dark:bg-red-900" data-testid="connection-status-disconnected">
           <WifiOff className="w-3 h-3 mr-1" />
-          {websocket.shouldUseFallback ? 'Using Fallback' : 'Disconnected'}
+          Disconnected
         </Badge>
       );
     }
@@ -52,23 +47,13 @@ export default function Dashboard() {
 
         <div className="flex-1 overflow-auto">
           <div className="p-6 space-y-6 m-0">
-            {/* Environment Control */}
-            <EnvironmentControlPanel />
+            {/* Master Wallet Status - Prominent at top */}
+            <MasterWalletStatus />
             
-            {/* Main Wallet Management */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <WalletGenerationPanel />
-              <FundingPanel />
-            </div>
+            {/* Wallet Generation */}
+            <WalletGenerationPanel />
             
-            {/* Enhanced Monitoring */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <RealTimeMonitor />
-              <SystemStats />
-            </div>
-            
-            {/* Wallet Status & Table */}
-            <WalletStatusMonitor />
+            {/* Wallet Table - View and manage wallets only */}
             <WalletTable />
           </div>
         </div>

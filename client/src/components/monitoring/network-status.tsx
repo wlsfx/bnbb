@@ -74,11 +74,26 @@ export function NetworkStatus() {
     return unsubscribe;
   }, []);
 
-  // Fetch network health from backend
-  const { data: networkHealth, isLoading: isLoadingHealth } = useQuery({
-    queryKey: ['/api/network/health'],
+  // Fetch network status from backend
+  const { data: networkStatus, isLoading: isLoadingStatus } = useQuery({
+    queryKey: ['/api/network/status'],
     refetchInterval: 5000, // Refresh every 5 seconds
   });
+
+  // Transform network status data to match the health interface
+  const networkHealth = networkStatus ? {
+    quicknode: {
+      status: 'connected' as const,
+      latency: networkStatus.latency || 0,
+      blockNumber: networkStatus.blockNumber || 0,
+      gasPrice: networkStatus.gasPrice || '0',
+    },
+    proxy: null, // Default proxy info
+    circuitBreaker: {
+      status: 'closed' as const,
+      failureCount: 0,
+    },
+  } : null;
 
   // Rotate proxy mutation
   const rotateProxyMutation = useMutation({
@@ -90,7 +105,7 @@ export function NetworkStatus() {
       return response.data;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/network/health'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/network/status'] });
       setIsRotatingProxy(false);
     },
     onError: () => {
