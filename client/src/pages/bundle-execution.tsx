@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
+import { useParams } from 'wouter';
+import { useWebSocket } from '../hooks/useWebSocket';
 import { queryClient, apiRequest } from '@/lib/queryClient';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -50,16 +52,41 @@ interface BundleProgressResponse {
 
 export default function BundleExecutionPage() {
   const { toast } = useToast();
-  const [selectedBundle, setSelectedBundle] = useState<string | null>(null);
+  const params = useParams();
+  const bundleIdFromUrl = (params as any).id;
+  const [selectedBundle, setSelectedBundle] = useState<string | null>(bundleIdFromUrl || null);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize] = useState(10);
   const [dateRange, setDateRange] = useState<{ start?: string; end?: string }>({});
+  const [realtimeProgress, setRealtimeProgress] = useState<any>(null);
+
+  // WebSocket connection for real-time updates
+  const websocket = useWebSocket({
+    enabled: true,
+    onMessage: (data) => {
+      if (data.type === 'bundleExecutionUpdate') {
+        const update = data.data;
+        if (update.bundleExecutionId === selectedBundle) {
+          setRealtimeProgress(update.progress);
+          // Refresh queries to get latest data
+          queryClient.invalidateQueries({ queryKey: ['/api/bundles', selectedBundle] });
+        }
+      }
+    }
+  });
+
+  // Set selected bundle from URL on mount
+  useEffect(() => {
+    if (bundleIdFromUrl) {
+      setSelectedBundle(bundleIdFromUrl);
+    }
+  }, [bundleIdFromUrl]);
 
   // Fetch bundle history
   const { data: history, isLoading: isLoadingHistory, refetch: refetchHistory } = useQuery<BundleHistoryResponse>({
-    queryKey: ['/api/bundles/history', currentPage, pageSize, statusFilter, dateRange],
+    queryKey: ['/api/bundles', currentPage, pageSize, statusFilter, dateRange],
     queryFn: async () => {
       const params = new URLSearchParams({
         page: currentPage.toString(),
@@ -68,9 +95,14 @@ export default function BundleExecutionPage() {
         ...(dateRange.start && { startDate: dateRange.start }),
         ...(dateRange.end && { endDate: dateRange.end }),
       });
-      const response = await fetch(`/api/bundles/history?${params}`);
-      if (!response.ok) throw new Error('Failed to fetch bundle history');
-      return response.json();
+      const response = await apiRequest('GET', `/api/bundles?${params}`);
+      const bundles = await response.json();
+      return {
+        data: bundles,
+        total: bundles.length,
+        page: currentPage,
+        pageSize: pageSize
+      };
     },
   });
 
@@ -78,22 +110,32 @@ export default function BundleExecutionPage() {
   const { data: bundleProgress, isLoading: isLoadingProgress } = useQuery<BundleProgressResponse>({
     queryKey: ['/api/bundles', selectedBundle, 'progress'],
     queryFn: async () => {
-      const response = await fetch(`/api/bundles/${selectedBundle}/progress`);
-      if (!response.ok) throw new Error('Failed to fetch bundle progress');
-      return response.json();
+      // Get bundle status
+      const statusResponse = await apiRequest('GET', `/api/bundles/${selectedBundle}/status`);
+      const bundle = await statusResponse.json();
+      
+      // Get bundle transactions
+      const transactionsResponse = await apiRequest('GET', `/api/bundles/${selectedBundle}/transactions`);
+      const transactionData = await transactionsResponse.json();
+      
+      return {
+        bundle: bundle,
+        transactions: transactionData.transactions || [],
+        events: [],
+        analytics: transactionData.summary || realtimeProgress
+      };
     },
     enabled: !!selectedBundle,
-    refetchInterval: selectedBundle ? 2000 : false, // Poll every 2 seconds for active bundles
+    refetchInterval: selectedBundle ? 5000 : false, // Poll every 5 seconds for active bundles
   });
 
   // Update bundle status mutation
   const updateBundleStatus = useMutation({
-    mutationFn: async ({ bundleId, status, failureReason }: { 
+    mutationFn: async ({ bundleId, action }: { 
       bundleId: string; 
-      status: string; 
-      failureReason?: string 
+      action: 'pause' | 'resume' | 'cancel';
     }) => {
-      return apiRequest(`/api/bundles/${bundleId}/status`, 'PUT', { status, failureReason });
+      return apiRequest('POST', `/api/bundles/${bundleId}/${action}`, {});
     },
     onSuccess: () => {
       toast({
@@ -135,8 +177,8 @@ export default function BundleExecutionPage() {
     setSelectedBundle(bundleId === selectedBundle ? null : bundleId);
   };
 
-  const handleStatusChange = (bundleId: string, newStatus: string) => {
-    updateBundleStatus.mutate({ bundleId, status: newStatus });
+  const handleBundleAction = (bundleId: string, action: 'pause' | 'resume' | 'cancel') => {
+    updateBundleStatus.mutate({ bundleId, action });
   };
 
   const getBundleStatusColor = (status: string) => {
@@ -218,7 +260,7 @@ export default function BundleExecutionPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => handleStatusChange(selectedBundle, 'paused')}
+                            onClick={() => handleBundleAction(selectedBundle, 'pause')}
                             data-testid="button-pause-bundle"
                           >
                             <PauseCircle className="h-4 w-4 mr-2" />

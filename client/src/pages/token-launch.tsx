@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useLocation } from 'wouter';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -145,6 +146,7 @@ type BundleExecutionForm = z.infer<typeof bundleExecutionSchema>;
 type AdvancedStealthForm = z.infer<typeof advancedStealthSchema>;
 
 export default function TokenLaunch() {
+  const [, setLocation] = useLocation();
   const [activeExecutions, setActiveExecutions] = useState<string[]>([]);
   const [showAdvancedStealth, setShowAdvancedStealth] = useState(false);
   const [stealthPreset, setStealthPreset] = useState<'basic' | 'advanced' | 'military'>('basic');
@@ -296,16 +298,30 @@ export default function TokenLaunch() {
   // Execute bundle mutation
   const executeBundleMutation = useMutation({
     mutationFn: async (data: BundleExecutionForm) => {
-      const response = await apiRequest('POST', '/api/bundle-executions', data);
+      // Prepare the bundle execution config
+      const executionConfig = {
+        launchPlanId: data.launchPlanId,
+        transactionType: 'swap', // Default to swap for token launches
+        executionMode: 'parallel',
+        parameters: {
+          tokenAddress: '0x', // Will be populated from launch plan
+          amount: '0.01', // Default amount per transaction
+        },
+        stealthConfig: data.stealthConfig,
+      };
+      
+      const response = await apiRequest('POST', '/api/bundles/execute', executionConfig);
       return response.json();
     },
     onSuccess: (data) => {
       toast({
         title: "Bundle Execution Started",
-        description: `Started execution for ${data.totalWallets} wallets`,
+        description: `Started execution with ID: ${data.bundleId}`,
       });
-      queryClient.invalidateQueries({ queryKey: ['/api/bundle-executions'] });
-      setActiveExecutions(prev => [...prev, data.id]);
+      queryClient.invalidateQueries({ queryKey: ['/api/bundles'] });
+      setActiveExecutions(prev => [...prev, data.bundleId]);
+      // Navigate to bundle execution page
+      setLocation(`/bundle-execution/${data.bundleId}`);
     },
     onError: (error) => {
       toast({

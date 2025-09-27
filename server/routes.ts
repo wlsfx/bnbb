@@ -13,6 +13,7 @@ import { eq, desc } from "drizzle-orm";
 import type { Request, Response, NextFunction } from "express";
 import { createAuthRoutes } from './auth-routes';
 import { AuthService } from './auth-service';
+import { WalletService } from './wallet-service';
 
 interface AuthRequest extends Request {
   session?: {
@@ -102,7 +103,7 @@ function createHealthCheck(storage: any, services: any) {
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get services from app.locals (initialized in index.ts)
-  const { storage, proxyService, bscClient, stealthPatterns, jobQueue, bundleExecutor, webSocketService, presetManager } = app.locals.services;
+  const { storage, proxyService, bscClient, stealthPatterns, jobQueue, bundleExecutor, webSocketService, presetManager, walletService } = app.locals.services;
 
   // Initialize auth service and register auth routes
   const authService = new AuthService(storage);
@@ -112,7 +113,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Authentication middleware
   async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
     try {
-      const sessionToken = req.session?.sessionToken || req.headers.authorization?.replace('Bearer ', '') || req.headers['x-session-token'];
+      const sessionToken = req.session?.sessionToken || 
+                          req.headers.authorization?.replace('Bearer ', '') || 
+                          req.headers['x-session-token'] ||
+                          req.cookies?.sessionToken;
       
       if (!sessionToken) {
         return res.status(401).json({
@@ -190,7 +194,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const accessKeyId = req.session!.accessKeyId!;
       const wallets = await storage.getWallets(accessKeyId);
-      res.json(wallets);
+      // Sanitize wallets to remove private keys
+      const sanitizedWallets = wallets.map(w => walletService.sanitizeWalletForResponse(w));
+      res.json(sanitizedWallets);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch wallets" });
     }
@@ -203,79 +209,92 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!wallet) {
         return res.status(404).json({ message: "Wallet not found" });
       }
-      res.json(wallet);
+      // Sanitize wallet to remove private key
+      const sanitizedWallet = walletService.sanitizeWalletForResponse(wallet);
+      res.json(sanitizedWallet);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch wallet" });
     }
   });
 
-  app.post("/api/wallets", requireAuth, async (req: AuthRequest, res) => {
+  // Generate new wallet endpoint
+  app.post("/api/wallets/generate", requireAuth, async (req: AuthRequest, res) => {
     try {
       const accessKeyId = req.session!.accessKeyId!;
-      const validatedData = insertWalletSchema.parse(req.body);
-      const wallet = await storage.createWallet(validatedData, accessKeyId);
+      const { label, initialBalance, useMnemonic } = req.body;
+      
+      const wallet = await walletService.createWallet(accessKeyId, {
+        labelPrefix: label,
+        initialBalance,
+        mnemonic: useMnemonic ? undefined : undefined // Auto-generate if not provided
+      });
       
       // Create activity for wallet generation
       const activity = await storage.createActivity({
         type: "wallet_generated",
-        description: `Wallet ${wallet.label || wallet.id} generated`,
+        description: `Wallet ${wallet.label || wallet.address} generated`,
         walletId: wallet.id,
         status: "confirmed",
       });
 
       // Broadcast wallet update via WebSocket
-      webSocketService.broadcastWalletUpdate(wallet, accessKeyId);
+      const sanitizedWallet = walletService.sanitizeWalletForResponse(wallet);
+      webSocketService.broadcastWalletUpdate(sanitizedWallet, accessKeyId);
       
       // Broadcast activity update via WebSocket
       webSocketService.broadcastActivityUpdate(activity, accessKeyId);
 
-      res.status(201).json(wallet);
+      res.status(201).json(sanitizedWallet);
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ message: "Invalid wallet data", errors: error.errors });
-      }
-      res.status(500).json({ message: "Failed to create wallet" });
+      console.error('Wallet generation error:', error);
+      res.status(500).json({ message: "Failed to generate wallet" });
     }
+  });
+
+  app.post("/api/wallets", requireAuth, async (req: AuthRequest, res) => {
+    // Redirect to generate endpoint for backward compatibility
+    return app._router.handle(Object.assign(req, { url: '/api/wallets/generate' }), res);
   });
 
   app.post("/api/wallets/bulk", requireAuth, async (req: AuthRequest, res) => {
     try {
       const accessKeyId = req.session!.accessKeyId!;
-      const { count, initialBalance, labelPrefix } = req.body;
-      const wallets = [];
+      const { count = 1, initialBalance, labelPrefix, nameTemplate, groupTag } = req.body;
       
-      for (let i = 0; i < count; i++) {
-        // Generate mock wallet data - in production this would use ethers.js
-        const walletData = {
-          address: `0x${Math.random().toString(16).substring(2, 42)}`,
-          privateKey: `0x${Math.random().toString(16).substring(2, 66)}`,
-          publicKey: `0x${Math.random().toString(16).substring(2, 130)}`,
-          balance: initialBalance || "0",
-          status: "idle",
-          label: `${labelPrefix || "Wallet"} #${(i + 1).toString().padStart(3, "0")}`,
-        };
-        
-        const wallet = await storage.createWallet(walletData, accessKeyId);
-        wallets.push(wallet);
+      // Validate count
+      if (count < 1 || count > 5000) {
+        return res.status(400).json({ message: "Count must be between 1 and 5000" });
       }
+      
+      const wallets = await walletService.createBulkWallets(accessKeyId, {
+        count,
+        initialBalance,
+        labelPrefix,
+        nameTemplate,
+        groupTag,
+        metadata: { source: 'bulk_generation' }
+      });
 
       // Create bulk activity
       const activity = await storage.createActivity({
         type: "bulk_wallet_generation",
         description: `Generated ${count} wallets`,
         status: "confirmed",
+        metadata: JSON.stringify({ count, groupTag })
       });
 
-      // Broadcast wallet updates via WebSocket
-      wallets.forEach(wallet => {
+      // Sanitize and broadcast wallet updates
+      const sanitizedWallets = wallets.map(w => walletService.sanitizeWalletForResponse(w));
+      sanitizedWallets.forEach(wallet => {
         webSocketService.broadcastWalletUpdate(wallet, accessKeyId);
       });
       
       // Broadcast activity update via WebSocket
       webSocketService.broadcastActivityUpdate(activity, accessKeyId);
 
-      res.status(201).json(wallets);
+      res.status(201).json(sanitizedWallets);
     } catch (error) {
+      console.error('Bulk wallet generation error:', error);
       res.status(500).json({ message: "Failed to create wallets" });
     }
   });
@@ -288,12 +307,99 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Wallet not found" });
       }
       
-      // Broadcast wallet update via WebSocket
-      webSocketService.broadcastWalletUpdate(wallet, accessKeyId);
+      const sanitizedWallet = walletService.sanitizeWalletForResponse(wallet);
       
-      res.json(wallet);
+      // Broadcast wallet update via WebSocket
+      webSocketService.broadcastWalletUpdate(sanitizedWallet, accessKeyId);
+      
+      res.json(sanitizedWallet);
     } catch (error) {
       res.status(500).json({ message: "Failed to update wallet" });
+    }
+  });
+  
+  // Get wallet balance endpoint
+  app.get("/api/wallets/:id/balance", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const accessKeyId = req.session!.accessKeyId!;
+      const wallet = await storage.getWallet(req.params.id, accessKeyId);
+      if (!wallet) {
+        return res.status(404).json({ message: "Wallet not found" });
+      }
+      
+      const balance = await walletService.getWalletBalance(wallet.address);
+      
+      // Update stored balance if different
+      if (balance !== wallet.balance) {
+        await storage.updateWallet(req.params.id, { balance }, accessKeyId);
+      }
+      
+      res.json({ 
+        address: wallet.address, 
+        balance,
+        lastUpdated: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Balance fetch error:', error);
+      res.status(500).json({ message: "Failed to fetch balance" });
+    }
+  });
+  
+  // Fund wallet endpoint
+  app.post("/api/wallets/:id/fund", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const accessKeyId = req.session!.accessKeyId!;
+      const { amount, fromPrivateKey } = req.body;
+      
+      if (!amount || parseFloat(amount) <= 0) {
+        return res.status(400).json({ message: "Invalid funding amount" });
+      }
+      
+      const result = await walletService.fundWallet(
+        req.params.id,
+        amount,
+        accessKeyId,
+        fromPrivateKey
+      );
+      
+      // Create activity for funding
+      const wallet = await storage.getWallet(req.params.id, accessKeyId);
+      if (wallet) {
+        await storage.createActivity({
+          type: "wallet_funded",
+          description: `Wallet ${wallet.label || wallet.address} funded with ${amount} BNB`,
+          walletId: req.params.id,
+          status: "confirmed",
+          amount,
+          metadata: JSON.stringify({ txHash: result.txHash })
+        });
+      }
+      
+      res.json({ 
+        success: true,
+        txHash: result.txHash,
+        amount: result.amount
+      });
+    } catch (error) {
+      console.error('Wallet funding error:', error);
+      res.status(500).json({ message: "Failed to fund wallet" });
+    }
+  });
+  
+  // Sync all wallet balances endpoint
+  app.post("/api/wallets/sync-balances", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const accessKeyId = req.session!.accessKeyId!;
+      const updatedCount = await walletService.syncWalletBalances(accessKeyId);
+      
+      res.json({ 
+        success: true,
+        message: `Updated ${updatedCount} wallet balances`,
+        updatedCount
+      });
+    } catch (error) {
+      console.error('Balance sync error:', error);
+      res.status(500).json({ message: "Failed to sync wallet balances" });
     }
   });
 
@@ -922,6 +1028,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch bundle analytics" });
+    }
+  });
+
+  // Get all transactions for a bundle
+  app.get("/api/bundles/:id/transactions", async (req, res) => {
+    try {
+      const bundleId = req.params.id;
+      const bundle = await storage.getBundleExecution(bundleId);
+      
+      if (!bundle) {
+        return res.status(404).json({ message: "Bundle not found" });
+      }
+      
+      const transactions = await storage.getBundleTransactionsByBundleId(bundleId);
+      
+      res.json({
+        bundleId,
+        totalTransactions: transactions.length,
+        transactions,
+        summary: {
+          pending: transactions.filter((t: any) => t.status === TRANSACTION_STATUS.PENDING).length,
+          broadcasting: transactions.filter((t: any) => t.status === TRANSACTION_STATUS.BROADCASTING).length,
+          confirmed: transactions.filter((t: any) => t.status === TRANSACTION_STATUS.CONFIRMED).length,
+          failed: transactions.filter((t: any) => t.status === TRANSACTION_STATUS.FAILED).length,
+          retrying: transactions.filter((t: any) => t.status === TRANSACTION_STATUS.RETRYING).length,
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch bundle transactions" });
     }
   });
 
@@ -1956,6 +2091,187 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       console.error('Error creating preset analytics:', error);
       res.status(500).json({ message: "Failed to create analytics record" });
+    }
+  });
+
+  // ===== TOKEN DEPLOYMENT AND MANAGEMENT API ROUTES =====
+  
+  // Token service will be imported dynamically when needed
+  
+  // Deploy a new BEP-20 token
+  app.post("/api/tokens/deploy", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { name, symbol, totalSupply, decimals, walletId, launchPlanId } = req.body;
+      
+      // Validate required fields
+      if (!name || !symbol || !totalSupply || !decimals || !walletId) {
+        return res.status(400).json({ 
+          message: "Missing required fields: name, symbol, totalSupply, decimals, walletId" 
+        });
+      }
+      
+      // Get wallet from storage
+      const wallet = await storage.getWallet(walletId, req.session?.accessKeyId || '');
+      if (!wallet) {
+        return res.status(404).json({ message: "Wallet not found" });
+      }
+      
+      // Decrypt wallet private key
+      const walletService = new WalletService();
+      const privateKey = walletService.decryptPrivateKey(wallet.encryptedPrivateKey);
+      
+      // Import token service dynamically
+      const { tokenService } = await import('./token-service');
+      
+      // Deploy token
+      const deployment = await tokenService.deployToken(
+        privateKey,
+        { name, symbol, totalSupply: totalSupply.toString(), decimals },
+        launchPlanId
+      );
+      
+      res.json({
+        success: true,
+        tokenAddress: deployment.tokenAddress,
+        transactionHash: deployment.transactionHash,
+        deploymentId: deployment.deploymentId
+      });
+    } catch (error) {
+      console.error('Error deploying token:', error);
+      res.status(500).json({ 
+        message: "Failed to deploy token", 
+        error: error instanceof Error ? error.message : "Unknown error" 
+      });
+    }
+  });
+  
+  // Get all deployed tokens
+  app.get("/api/tokens", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const tokens = await storage.getTokens();
+      res.json(tokens);
+    } catch (error) {
+      console.error('Error fetching tokens:', error);
+      res.status(500).json({ message: "Failed to fetch tokens" });
+    }
+  });
+  
+  // Get token details by address
+  app.get("/api/tokens/:address", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { address } = req.params;
+      
+      // Get token from database
+      const token = await storage.getTokenByAddress(address);
+      
+      if (!token) {
+        // Try to fetch from blockchain
+        const { tokenService } = await import('./token-service');
+        const tokenInfo = await tokenService.getTokenInfo(address);
+        return res.json({
+          address,
+          ...tokenInfo,
+          isStored: false
+        });
+      }
+      
+      // Get additional blockchain info
+      const { tokenService } = await import('./token-service');
+      const blockchainInfo = await tokenService.getTokenInfo(address);
+      
+      res.json({
+        ...token,
+        ...blockchainInfo,
+        isStored: true
+      });
+    } catch (error) {
+      console.error('Error fetching token details:', error);
+      res.status(500).json({ message: "Failed to fetch token details" });
+    }
+  });
+  
+  // Add liquidity to PancakeSwap
+  app.post("/api/tokens/:address/add-liquidity", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { address } = req.params;
+      const { walletId, tokenAmount, bnbAmount, slippageTolerance } = req.body;
+      
+      if (!walletId || !tokenAmount || !bnbAmount) {
+        return res.status(400).json({ 
+          message: "Missing required fields: walletId, tokenAmount, bnbAmount" 
+        });
+      }
+      
+      // Get wallet
+      const wallet = await storage.getWallet(walletId, req.session?.accessKeyId || '');
+      if (!wallet) {
+        return res.status(404).json({ message: "Wallet not found" });
+      }
+      
+      // Decrypt wallet private key
+      const walletService = new WalletService();
+      const privateKey = walletService.decryptPrivateKey(wallet.encryptedPrivateKey);
+      
+      // Add liquidity
+      const { tokenService } = await import('./token-service');
+      const result = await tokenService.addLiquidity(
+        privateKey,
+        address,
+        tokenAmount,
+        bnbAmount,
+        slippageTolerance
+      );
+      
+      res.json({
+        success: true,
+        poolAddress: result.poolAddress,
+        transactionHash: result.transactionHash,
+        liquidityTokenAmount: result.liquidityTokenAmount
+      });
+    } catch (error) {
+      console.error('Error adding liquidity:', error);
+      res.status(500).json({ 
+        message: "Failed to add liquidity", 
+        error: error instanceof Error ? error.message : "Unknown error" 
+      });
+    }
+  });
+  
+  // Get token holders
+  app.get("/api/tokens/:address/holders", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { address } = req.params;
+      const { limit = 100 } = req.query;
+      
+      const { tokenService } = await import('./token-service');
+      const holders = await tokenService.getTokenHolders(
+        address, 
+        parseInt(limit as string)
+      );
+      
+      res.json(holders);
+    } catch (error) {
+      console.error('Error fetching token holders:', error);
+      res.status(500).json({ message: "Failed to fetch token holders" });
+    }
+  });
+  
+  // Get token balance for an address
+  app.get("/api/tokens/:tokenAddress/balance/:holderAddress", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { tokenAddress, holderAddress } = req.params;
+      
+      const { tokenService } = await import('./token-service');
+      const balance = await tokenService.getTokenBalance(tokenAddress, holderAddress);
+      
+      res.json({
+        tokenAddress,
+        holderAddress,
+        balance
+      });
+    } catch (error) {
+      console.error('Error fetching token balance:', error);
+      res.status(500).json({ message: "Failed to fetch token balance" });
     }
   });
 

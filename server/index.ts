@@ -1,14 +1,16 @@
 import express, { type Request, Response, NextFunction } from "express";
+import cookieParser from "cookie-parser";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { createProxyService } from "./proxy-service";
-import { DbStorage } from "./storage";
+import { DatabaseStorage } from "./storage";
 import { createBSCClient } from "./blockchain-client";
 import { createStealthPatterns } from "./stealth-patterns";
 import { createBundleJobQueue } from "./job-queue";
 import { createBundleExecutor } from "./bundle-executor";
 import { WebSocketService } from "./websocket-service";
 import { PresetManager } from "./preset-manager";
+import { WalletService } from "./wallet-service";
 
 const app = express();
 
@@ -17,14 +19,18 @@ app.set('trust proxy', 1);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
 
 // Initialize all services in dependency order
-const storage = new DbStorage();
+const storage = new DatabaseStorage();
 const proxyService = createProxyService(storage);
 const bscClient = createBSCClient(storage, proxyService);
 const stealthPatterns = createStealthPatterns(storage, proxyService);
 const jobQueue = createBundleJobQueue(storage, bscClient, stealthPatterns);
 const bundleExecutor = createBundleExecutor(storage, bscClient, stealthPatterns, jobQueue, proxyService);
+
+// Initialize wallet service for secure wallet management
+const walletService = new WalletService(storage, bscClient);
 
 // Initialize preset manager and seed default presets
 const presetManager = new PresetManager(storage);
@@ -37,16 +43,15 @@ app.locals.services = {
   stealthPatterns,
   jobQueue,
   bundleExecutor,
+  walletService,
   presetManager,
 };
 
 console.log('🚀 All bundle execution services initialized');
 
-// Apply global rate limiting
-app.use(proxyService.createGlobalRateLimiter(100));
-
-// Apply wallet-specific rate limiting for API routes
-app.use('/api/*', proxyService.createWalletRateLimiter(10));
+// Disable rate limiting for development debugging
+// app.use(proxyService.createGlobalRateLimiter(1000));
+// app.use('/api/*', proxyService.createWalletRateLimiter(100));
 
 // Add proxy headers middleware
 app.use(proxyService.proxyHeaderMiddleware());
@@ -70,7 +75,8 @@ app.get('/health', async (req, res) => {
 
   try {
     // Test database connectivity
-    await storage.getUsers();
+    // Test basic storage functionality
+    await storage.getActiveSessions();
     healthStatus.services.database = 'healthy';
   } catch (error) {
     healthStatus.services.database = 'unhealthy';
@@ -139,6 +145,9 @@ app.use((req, res, next) => {
   
   // Add WebSocket service to app.locals for route access
   app.locals.services.webSocketService = webSocketService;
+  
+  // Make webSocketService globally accessible for bundle executor
+  (global as any).webSocketService = webSocketService;
 
   console.log('🔌 WebSocket service initialized');
 

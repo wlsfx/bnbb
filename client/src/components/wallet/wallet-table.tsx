@@ -1,13 +1,15 @@
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Eye, Edit, Trash2, RefreshCw } from 'lucide-react';
+import { Eye, Edit, Trash2, RefreshCw, Copy, Check, DollarSign, Activity } from 'lucide-react';
 import { useWalletStore } from '../../stores/wallet-store';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow } from 'date-fns';
+import { useToast } from '@/hooks/use-toast';
+import { apiRequest } from '@/lib/queryClient';
 
 const getStatusColor = (status: string) => {
   switch (status) {
@@ -33,17 +35,79 @@ const getStatusIcon = (status: string) => {
 
 export function WalletTable() {
   const [currentPage, setCurrentPage] = useState(1);
-  const { wallets, totalBalance } = useWalletStore();
+  const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const walletsPerPage = 10;
 
-  const { refetch, isRefetching } = useQuery({
+  // Fetch wallets data
+  const { data: wallets = [], isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['/api/wallets'],
   });
+
+  // Sync balance mutation
+  const syncBalancesMutation = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest('POST', '/api/wallets/sync-balances');
+      return response.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: 'Balances Synced',
+        description: `Updated ${data.updatedCount} wallet balances`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/wallets'] });
+    },
+    onError: () => {
+      toast({
+        title: 'Sync Failed',
+        description: 'Failed to sync wallet balances',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  // Get balance mutation
+  const getBalanceMutation = useMutation({
+    mutationFn: async (walletId: string) => {
+      const response = await apiRequest('GET', `/api/wallets/${walletId}/balance`);
+      return response.json();
+    },
+    onSuccess: (data, walletId) => {
+      toast({
+        title: 'Balance Updated',
+        description: `Balance: ${data.balance} BNB`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/wallets'] });
+    },
+    onError: () => {
+      toast({
+        title: 'Failed to Get Balance',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  // Calculate total balance
+  const totalBalance = wallets.reduce((sum, wallet) => {
+    return sum + parseFloat(wallet.balance || '0');
+  }, 0).toFixed(8);
 
   const startIndex = (currentPage - 1) * walletsPerPage;
   const endIndex = startIndex + walletsPerPage;
   const currentWallets = wallets.slice(startIndex, endIndex);
   const totalPages = Math.ceil(wallets.length / walletsPerPage);
+
+  // Copy address to clipboard
+  const copyAddress = (address: string) => {
+    navigator.clipboard.writeText(address);
+    setCopiedAddress(address);
+    toast({
+      title: 'Address Copied',
+      description: 'Wallet address copied to clipboard',
+    });
+    setTimeout(() => setCopiedAddress(null), 2000);
+  };
 
   return (
     <Card>
@@ -66,6 +130,16 @@ export function WalletTable() {
             >
               <RefreshCw className={cn("w-4 h-4", isRefetching && "animate-spin")} />
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => syncBalancesMutation.mutate()}
+              disabled={syncBalancesMutation.isPending}
+              data-testid="button-sync-balances"
+            >
+              <Activity className="w-4 h-4 mr-2" />
+              Sync All
+            </Button>
           </div>
         </div>
       </CardHeader>
@@ -84,6 +158,23 @@ export function WalletTable() {
               </TableRow>
             </TableHeader>
             <TableBody>
+              {isLoading && (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-center py-8">
+                    <div className="flex items-center justify-center space-x-2">
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      <span>Loading wallets...</span>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              )}
+              {!isLoading && wallets.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                    No wallets found. Generate your first wallet to get started.
+                  </TableCell>
+                </TableRow>
+              )}
               {currentWallets.map((wallet, index) => (
                 <TableRow 
                   key={wallet.id} 
@@ -105,9 +196,24 @@ export function WalletTable() {
                   </TableCell>
                   
                   <TableCell>
-                    <code className="text-sm font-mono text-muted-foreground">
-                      {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
-                    </code>
+                    <div className="flex items-center space-x-2">
+                      <code className="text-sm font-mono text-muted-foreground">
+                        {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
+                      </code>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => copyAddress(wallet.address)}
+                        data-testid={`button-copy-${wallet.id}`}
+                      >
+                        {copiedAddress === wallet.address ? (
+                          <Check className="w-3 h-3 text-success" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                      </Button>
+                    </div>
                   </TableCell>
                   
                   <TableCell>
@@ -134,25 +240,30 @@ export function WalletTable() {
                         variant="ghost" 
                         size="icon" 
                         className="h-8 w-8 text-muted-foreground hover:text-primary"
+                        onClick={() => getBalanceMutation.mutate(wallet.id)}
+                        disabled={getBalanceMutation.isPending}
+                        title="Update Balance"
+                        data-testid={`button-balance-${wallet.id}`}
+                      >
+                        <Activity className="w-4 h-4" />
+                      </Button>
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-8 w-8 text-muted-foreground hover:text-success"
+                        title="Fund Wallet"
+                        data-testid={`button-fund-${wallet.id}`}
+                      >
+                        <DollarSign className="w-4 h-4" />
+                      </Button>
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-8 w-8 text-muted-foreground hover:text-primary"
+                        title="View Details"
                         data-testid={`button-view-${wallet.id}`}
                       >
                         <Eye className="w-4 h-4" />
-                      </Button>
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        className="h-8 w-8 text-muted-foreground hover:text-warning"
-                        data-testid={`button-edit-${wallet.id}`}
-                      >
-                        <Edit className="w-4 h-4" />
-                      </Button>
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        data-testid={`button-delete-${wallet.id}`}
-                      >
-                        <Trash2 className="w-4 h-4" />
                       </Button>
                     </div>
                   </TableCell>

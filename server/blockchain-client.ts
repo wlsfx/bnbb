@@ -3,6 +3,7 @@ import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import type { DbStorage } from './storage';
 import type { ProxyService } from './proxy-service';
+import type { EnvironmentConfig } from '@shared/schema';
 
 export interface BSCConfig {
   chainId: number;
@@ -66,25 +67,27 @@ export interface NonceManager {
 }
 
 export class BSCClient extends EventEmitter {
-  private provider: JsonRpcProvider;
+  private provider!: JsonRpcProvider;
   private wsProvider?: WebSocketProvider;
   private config: BSCConfig;
   private storage: DbStorage;
   private proxyService: ProxyService;
-  private nonceManager: NonceManager;
+  private nonceManager!: NonceManager;
   private wsSubscriptions: Map<string, any> = new Map();
   private pendingTransactions: Map<string, { resolve: Function; reject: Function; timeout: NodeJS.Timeout }> = new Map();
+  private currentEnvironment?: EnvironmentConfig;
+  private isInitialized = false;
 
   constructor(storage: DbStorage, proxyService: ProxyService) {
     super();
     this.storage = storage;
     this.proxyService = proxyService;
     
-    // BSC Mainnet configuration
+    // Placeholder config - will be replaced by loadEnvironmentConfig
     this.config = {
-      chainId: 56, // BSC Mainnet
-      rpcUrl: process.env.QUICKNODE_BSC_URL || '',
-      wsUrl: process.env.QUICKNODE_BSC_URL?.replace('https://', 'wss://').replace('http://', 'ws://'),
+      chainId: 97, // Default to testnet for development
+      rpcUrl: 'https://data-seed-prebsc-1-s1.binance.org:8545/',
+      wsUrl: undefined,
       gasLimit: {
         transfer: 21000,
         tokenCreation: 2000000,
@@ -93,24 +96,194 @@ export class BSCClient extends EventEmitter {
       },
     };
 
-    if (!this.config.rpcUrl) {
-      throw new Error('QUICKNODE_BSC_URL environment variable is required');
+    // Initialize with environment configuration
+    this.initializeAsync();
+  }
+
+  /**
+   * Async initialization to load environment configuration
+   */
+  private async initializeAsync(): Promise<void> {
+    try {
+      await this.loadEnvironmentConfig();
+      this.initializeProviders();
+      this.nonceManager = this.createNonceManager();
+      this.isInitialized = true;
+      
+      const networkName = this.currentEnvironment?.environment || 'testnet';
+      console.log(`🔗 BSC Client initialized for ${networkName} (Chain ID: ${this.config.chainId})`);
+    } catch (error) {
+      console.error('❌ Failed to initialize BSC client:', error);
+      // Fallback to testnet configuration
+      await this.setupFallbackConfig();
     }
+  }
 
-    // Initialize providers
-    this.initializeProviders();
+  /**
+   * Wait for initialization to complete
+   */
+  async waitForInitialization(): Promise<void> {
+    if (this.isInitialized) return;
     
-    // Initialize nonce manager
-    this.nonceManager = this.createNonceManager();
+    return new Promise((resolve) => {
+      const checkInit = () => {
+        if (this.isInitialized) {
+          resolve();
+        } else {
+          setTimeout(checkInit, 100);
+        }
+      };
+      checkInit();
+    });
+  }
 
-    console.log('🔗 BSC Client initialized with QuickNode');
+  /**
+   * Load active environment configuration from database
+   */
+  private async loadEnvironmentConfig(): Promise<void> {
+    try {
+      const activeEnv = await this.storage.getActiveEnvironment();
+      
+      if (!activeEnv) {
+        console.warn('⚠️ No active environment found, setting up default testnet');
+        await this.setupDefaultTestnetConfig();
+        return;
+      }
+
+      this.currentEnvironment = activeEnv;
+      this.config = {
+        chainId: activeEnv.chainId,
+        rpcUrl: activeEnv.rpcUrl,
+        wsUrl: activeEnv.wsUrl || undefined,
+        gasLimit: {
+          transfer: 21000,
+          tokenCreation: Math.floor(2000000 * Number(activeEnv.gasLimitMultiplier)),
+          liquidityAddition: Math.floor(1000000 * Number(activeEnv.gasLimitMultiplier)),
+          swap: Math.floor(500000 * Number(activeEnv.gasLimitMultiplier)),
+        },
+      };
+
+      console.log(`✅ Loaded ${activeEnv.environment} environment configuration`);
+    } catch (error) {
+      console.error('❌ Failed to load environment configuration:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Set up default environment configurations (testnet and mainnet)
+   */
+  private async setupDefaultTestnetConfig(): Promise<void> {
+    const testnetConfig = {
+      environment: 'testnet',
+      isActive: true,
+      networkId: 97,
+      chainId: 97,
+      rpcUrl: 'https://data-seed-prebsc-1-s1.binance.org:8545/',
+      wsUrl: null,
+      explorerUrl: 'https://testnet.bscscan.com/',
+      nativeCurrency: 'tBNB',
+      gasLimitMultiplier: '1.20',
+      maxGasPrice: '20000000000', // 20 gwei
+    };
+
+    const mainnetConfig = {
+      environment: 'mainnet',
+      isActive: false, // Testnet is default for development
+      networkId: 56,
+      chainId: 56,
+      rpcUrl: process.env.QUICKNODE_BSC_URL || 'https://bsc-dataseed1.binance.org/',
+      wsUrl: process.env.QUICKNODE_BSC_URL?.replace('https://', 'wss://').replace('http://', 'ws://'),
+      explorerUrl: 'https://bscscan.com/',
+      nativeCurrency: 'BNB',
+      gasLimitMultiplier: '1.10', // Lower multiplier for mainnet
+      maxGasPrice: '10000000000', // 10 gwei for mainnet
+    };
+
+    try {
+      // Check if configurations already exist
+      const [existingTestnet, existingMainnet] = await Promise.all([
+        this.storage.getEnvironmentConfig('testnet'),
+        this.storage.getEnvironmentConfig('mainnet')
+      ]);
+      
+      if (!existingTestnet) {
+        console.log('🔧 Creating default testnet configuration...');
+        await this.storage.createEnvironmentConfig(testnetConfig);
+      }
+      
+      if (!existingMainnet) {
+        console.log('🔧 Creating default mainnet configuration...');
+        await this.storage.createEnvironmentConfig(mainnetConfig);
+      }
+      
+      // Ensure testnet is active for development
+      if (!existingTestnet || !existingTestnet.isActive) {
+        console.log('🔧 Activating testnet as default environment...');
+        await this.storage.switchActiveEnvironment('testnet');
+      }
+
+      // Load the configuration
+      await this.loadEnvironmentConfig();
+    } catch (error) {
+      console.error('❌ Failed to setup default environment configs:', error);
+      await this.setupFallbackConfig();
+    }
+  }
+
+  /**
+   * Fallback configuration when database fails
+   */
+  private async setupFallbackConfig(): Promise<void> {
+    console.warn('⚠️ Using fallback testnet configuration');
+    this.config = {
+      chainId: 97,
+      rpcUrl: 'https://data-seed-prebsc-1-s1.binance.org:8545/',
+      wsUrl: undefined,
+      gasLimit: {
+        transfer: 21000,
+        tokenCreation: 2400000, // 20% higher for testnet
+        liquidityAddition: 1200000,
+        swap: 600000,
+      },
+    };
+    
+    this.initializeProviders();
+    this.nonceManager = this.createNonceManager();
+    this.isInitialized = true;
+  }
+
+  /**
+   * Reload configuration when environment is switched
+   */
+  async reloadEnvironment(): Promise<void> {
+    console.log('🔄 Reloading environment configuration...');
+    this.isInitialized = false;
+    await this.loadEnvironmentConfig();
+    this.initializeProviders();
+    this.isInitialized = true;
+    this.emit('environmentChanged', this.currentEnvironment);
+  }
+
+  /**
+   * Get current environment configuration
+   */
+  getCurrentEnvironment(): EnvironmentConfig | undefined {
+    return this.currentEnvironment;
   }
 
   private initializeProviders(): void {
+    if (!this.config.rpcUrl) {
+      console.error('❌ No RPC URL configured');
+      return;
+    }
+
+    const networkName = this.currentEnvironment?.environment === 'mainnet' ? 'bsc-mainnet' : 'bsc-testnet';
+    
     // Create HTTP provider for transactions
     this.provider = new JsonRpcProvider(this.config.rpcUrl, {
       chainId: this.config.chainId,
-      name: 'bsc-mainnet',
+      name: networkName,
     });
 
     // Create WebSocket provider for real-time monitoring
@@ -118,7 +291,7 @@ export class BSCClient extends EventEmitter {
       try {
         this.wsProvider = new WebSocketProvider(this.config.wsUrl, {
           chainId: this.config.chainId,
-          name: 'bsc-mainnet',
+          name: networkName,
         });
 
         // WebSocketProvider in ethers v6 automatically handles reconnection
@@ -181,6 +354,7 @@ export class BSCClient extends EventEmitter {
   }
 
   async estimateGas(transaction: TransactionRequest): Promise<number> {
+    await this.waitForInitialization();
     try {
       const gasEstimate = await this.provider.estimateGas(transaction);
       // Add 20% buffer for safety
@@ -193,6 +367,7 @@ export class BSCClient extends EventEmitter {
   }
 
   async getCurrentGasPrice(): Promise<string> {
+    await this.waitForInitialization();
     try {
       const gasPrice = await this.provider.getFeeData();
       return gasPrice.gasPrice?.toString() || '5000000000'; // 5 gwei fallback
@@ -206,6 +381,7 @@ export class BSCClient extends EventEmitter {
    * Get advanced gas price data with network congestion analysis
    */
   async getAdvancedGasData(): Promise<AdvancedGasData> {
+    await this.waitForInitialization();
     try {
       const feeData = await this.provider.getFeeData();
       const latestBlock = await this.provider.getBlock('latest');
@@ -321,6 +497,7 @@ export class BSCClient extends EventEmitter {
    * Get balance with advanced caching and error handling
    */
   async getBalance(address: string): Promise<string> {
+    await this.waitForInitialization();
     try {
       const balance = await this.provider.getBalance(address);
       return ethers.formatEther(balance);
@@ -344,6 +521,7 @@ export class BSCClient extends EventEmitter {
     const startTime = Date.now();
     
     try {
+      await this.waitForInitialization();
       const [blockNumber, gasData] = await Promise.all([
         this.provider.getBlockNumber(),
         this.getAdvancedGasData(),
@@ -385,181 +563,60 @@ export class BSCClient extends EventEmitter {
     }
   }
 
-  async signAndBroadcastTransaction(
-    privateKey: string,
-    options: TransactionOptions
-  ): Promise<TransactionResult> {
+  async sendTransaction(privateKey: string, options: TransactionOptions): Promise<TransactionResult> {
+    await this.waitForInitialization();
     try {
-      // Create wallet instance
       const wallet = new Wallet(privateKey, this.provider);
-      const address = wallet.address;
-
-      // Get or estimate gas price with variance for stealth
-      let gasPrice = options.gasPrice;
-      if (!gasPrice) {
-        const baseGasPrice = await this.getCurrentGasPrice();
-        // Add ±15% variance for stealth
-        const variance = (Math.random() - 0.5) * 0.3; // ±15%
-        const variedGasPrice = BigInt(Math.floor(Number(baseGasPrice) * (1 + variance)));
-        gasPrice = variedGasPrice.toString();
-      }
-
-      // Get nonce
-      const nonce = options.nonce ?? await this.nonceManager.getNonce(address);
-
-      // Estimate gas limit
-      const gasLimit = options.gasLimit ?? await this.estimateGas({
-        to: options.to,
-        value: options.value ? ethers.parseEther(options.value) : 0n,
-        data: options.data,
-        from: address,
-      });
-
-      // Build transaction
-      const transaction: TransactionRequest = {
-        to: options.to,
-        value: options.value ? ethers.parseEther(options.value) : 0n,
-        gasPrice: gasPrice,
-        gasLimit: gasLimit,
-        nonce: nonce,
-        chainId: this.config.chainId,
-        data: options.data,
-      };
-
-      console.log(`📝 Signing transaction for ${address} with nonce ${nonce}`);
-
-      // Sign and send transaction
-      const txResponse = await wallet.sendTransaction(transaction);
+      const userBehavior = this.determineUserBehavior(options.type);
       
-      // Update nonce cache
-      this.nonceManager.incrementNonce(address);
-
-      console.log(`📡 Transaction broadcasted: ${txResponse.hash}`);
-
-      // Start monitoring for receipt
-      this.monitorTransaction(txResponse.hash);
-
-      return {
-        hash: txResponse.hash,
-        nonce: nonce,
-        gasPrice: gasPrice,
-        gasLimit: gasLimit,
+      // Get optimized gas pricing
+      const gasData = await this.calculateMarketAwareGasPrice(userBehavior);
+      
+      const txRequest: TransactionRequest = {
         to: options.to,
         value: options.value || '0',
         data: options.data,
-        chainId: this.config.chainId,
+        gasLimit: options.gasLimit || this.config.gasLimit.transfer,
+        gasPrice: options.gasPrice || gasData.gasPrice,
+        nonce: options.nonce || await this.nonceManager.getNonce(wallet.address),
+        type: 2, // EIP-1559 transaction type
+        maxFeePerGas: options.maxFeePerGas || gasData.gasPrice,
+        maxPriorityFeePerGas: options.priorityFee || gasData.priorityFee,
       };
 
+      const txResponse = await wallet.sendTransaction(txRequest);
+      
+      // Increment nonce for next transaction
+      this.nonceManager.incrementNonce(wallet.address);
+      
+      return {
+        hash: txResponse.hash,
+        nonce: txResponse.nonce,
+        gasPrice: txResponse.gasPrice?.toString() || '0',
+        gasLimit: Number(txResponse.gasLimit),
+        to: txResponse.to,
+        value: txResponse.value?.toString() || '0',
+        data: txResponse.data,
+        chainId: this.config.chainId,
+      };
     } catch (error) {
-      console.error('❌ Failed to sign and broadcast transaction:', error);
+      console.error('❌ Transaction failed:', error);
       throw new Error(`Transaction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
-  async getTransactionReceipt(hash: string): Promise<TransactionReceipt | null> {
+  async waitForTransaction(txHash: string): Promise<TransactionReceipt | null> {
+    await this.waitForInitialization();
     try {
-      return await this.provider.getTransactionReceipt(hash);
+      return await this.provider.waitForTransaction(txHash);
     } catch (error) {
-      console.error(`❌ Failed to get receipt for ${hash}:`, error);
+      console.error(`❌ Failed to wait for transaction ${txHash}:`, error);
       return null;
     }
   }
 
-  async waitForTransactionReceipt(
-    hash: string,
-    confirmations: number = 1,
-    timeout: number = 60000
-  ): Promise<TransactionReceipt> {
-    return new Promise((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        this.pendingTransactions.delete(hash);
-        reject(new Error(`Transaction ${hash} timed out after ${timeout}ms`));
-      }, timeout);
-
-      this.pendingTransactions.set(hash, {
-        resolve: (receipt: TransactionReceipt) => {
-          clearTimeout(timeoutId);
-          this.pendingTransactions.delete(hash);
-          resolve(receipt);
-        },
-        reject: (error: Error) => {
-          clearTimeout(timeoutId);
-          this.pendingTransactions.delete(hash);
-          reject(error);
-        },
-        timeout: timeoutId,
-      });
-
-      // Start monitoring if not already monitoring
-      if (!this.wsSubscriptions.has(hash)) {
-        this.monitorTransaction(hash, confirmations);
-      }
-    });
-  }
-
-  private async monitorTransaction(hash: string, confirmations: number = 1): Promise<void> {
-    if (this.wsSubscriptions.has(hash)) {
-      return; // Already monitoring
-    }
-
-    const checkReceipt = async () => {
-      try {
-        const receipt = await this.getTransactionReceipt(hash);
-        if (receipt) {
-          const currentBlock = await this.provider.getBlockNumber();
-          const confirmationCount = currentBlock - receipt.blockNumber + 1;
-
-          this.emit('transactionUpdate', {
-            hash,
-            receipt,
-            confirmations: confirmationCount,
-            status: receipt.status === 1 ? 'confirmed' : 'failed',
-          });
-
-          if (confirmationCount >= confirmations) {
-            // Transaction confirmed
-            const pending = this.pendingTransactions.get(hash);
-            if (pending) {
-              if (receipt.status === 1) {
-                pending.resolve(receipt);
-              } else {
-                pending.reject(new Error(`Transaction ${hash} failed`));
-              }
-            }
-
-            // Clean up monitoring
-            this.wsSubscriptions.delete(hash);
-            return;
-          }
-        }
-
-        // Continue monitoring
-        setTimeout(checkReceipt, 2000); // Check every 2 seconds
-      } catch (error) {
-        console.error(`❌ Error monitoring transaction ${hash}:`, error);
-        const pending = this.pendingTransactions.get(hash);
-        if (pending) {
-          pending.reject(error as Error);
-        }
-        this.wsSubscriptions.delete(hash);
-      }
-    };
-
-    this.wsSubscriptions.set(hash, true);
-    checkReceipt();
-  }
-
-  async getBalance(address: string): Promise<string> {
-    try {
-      const balance = await this.provider.getBalance(address);
-      return ethers.formatEther(balance);
-    } catch (error) {
-      console.error(`❌ Failed to get balance for ${address}:`, error);
-      throw new Error(`Failed to get balance: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
   async getBlockNumber(): Promise<number> {
+    await this.waitForInitialization();
     try {
       return await this.provider.getBlockNumber();
     } catch (error) {
@@ -568,85 +625,29 @@ export class BSCClient extends EventEmitter {
     }
   }
 
-  // Utility method for batch operations
-  async executeBatchTransactions(
-    transactions: Array<{
-      privateKey: string;
-      options: TransactionOptions;
-    }>
-  ): Promise<TransactionResult[]> {
-    const results: TransactionResult[] = [];
-    
-    for (const { privateKey, options } of transactions) {
-      try {
-        const result = await this.signAndBroadcastTransaction(privateKey, options);
-        results.push(result);
-      } catch (error) {
-        results.push({
-          hash: '',
-          nonce: 0,
-          gasPrice: '0',
-          gasLimit: 0,
-          value: '0',
-          chainId: this.config.chainId,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
+  // Cleanup method
+  destroy(): void {
+    // Clear all WebSocket subscriptions
+    for (const [key, subscription] of this.wsSubscriptions) {
+      if (subscription && typeof subscription.unsubscribe === 'function') {
+        subscription.unsubscribe();
       }
     }
+    this.wsSubscriptions.clear();
 
-    return results;
-  }
-
-  // Clean up resources
-  async disconnect(): Promise<void> {
-    try {
-      // Clear all pending transactions
-      for (const [hash, pending] of this.pendingTransactions) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error('Client disconnecting'));
-      }
-      this.pendingTransactions.clear();
-
-      // Clear subscriptions
-      this.wsSubscriptions.clear();
-
-      // Disconnect WebSocket provider
-      if (this.wsProvider) {
-        this.wsProvider.removeAllListeners();
-        // Note: ethers.js WebSocketProvider doesn't have explicit disconnect
-      }
-
-      console.log('🔌 BSC Client disconnected');
-    } catch (error) {
-      console.error('❌ Error during disconnect:', error);
+    // Clear pending transaction timeouts
+    for (const [hash, { timeout }] of this.pendingTransactions) {
+      clearTimeout(timeout);
     }
-  }
+    this.pendingTransactions.clear();
 
-  // Health check
-  async healthCheck(): Promise<{ healthy: boolean; latency: number; blockNumber?: number; error?: string }> {
-    const startTime = Date.now();
-    
-    try {
-      const blockNumber = await this.getBlockNumber();
-      const latency = Date.now() - startTime;
-      
-      return {
-        healthy: true,
-        latency,
-        blockNumber,
-      };
-    } catch (error) {
-      const latency = Date.now() - startTime;
-      return {
-        healthy: false,
-        latency,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      };
+    // Close WebSocket provider
+    if (this.wsProvider) {
+      this.wsProvider.destroy();
     }
   }
 }
 
-// Factory function for creating BSC client
 export function createBSCClient(storage: DbStorage, proxyService: ProxyService): BSCClient {
   return new BSCClient(storage, proxyService);
 }

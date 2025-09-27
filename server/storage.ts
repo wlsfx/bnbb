@@ -31,6 +31,11 @@ import {
   type BulkOperation, type InsertBulkOperation,
   type BulkOperationProgress, type InsertBulkOperationProgress,
   type WalletTag, type InsertWalletTag,
+  // Token types
+  type Token, type InsertToken,
+  type LiquidityPool, type InsertLiquidityPool,
+  type TokenHolder, type InsertTokenHolder,
+  type TokenDeployment, type InsertTokenDeployment,
   users, wallets, launchPlans, bundleExecutions, activities, systemMetrics, 
   stealthFundingSnapshots, environmentConfig, launchSessions,
   bundleTransactions, transactionEvents, bundleAnalytics,
@@ -41,6 +46,8 @@ import {
   pnlAlerts, marketDataCache,
   // Wallet pool and bulk operations tables
   walletPools, walletPoolMemberships, bulkOperations, bulkOperationProgress, walletTags,
+  // Token tables
+  tokens, liquidityPools, tokenHolders, tokenDeployments,
   // Preset system tables and types
   type LaunchPreset, type InsertLaunchPreset,
   type UserPreset, type InsertUserPreset, 
@@ -49,9 +56,9 @@ import {
   BUNDLE_STATUS, TRANSACTION_STATUS
 } from "@shared/schema";
 import { randomUUID } from "crypto";
-import { drizzle } from "drizzle-orm/neon-http";
-import { neon } from "@neondatabase/serverless";
+import bcrypt from "bcrypt";
 import { eq, desc, sql, and, gte, lte, inArray, isNull } from "drizzle-orm";
+import { db } from "./db";
 
 export interface IStorage {
   // User methods
@@ -347,19 +354,88 @@ export interface IStorage {
   getPresetAnalyticsByUser(accessKeyId: string): Promise<PresetAnalytics[]>;
   createPresetAnalytics(analytics: InsertPresetAnalytics): Promise<PresetAnalytics>;
   getPresetUsageStats(presetId: string): Promise<{ totalUses: number; averageSuccessRate: number; averageExecutionTime: number }>;
+
+  // Token methods
+  getToken(id: string): Promise<Token | undefined>;
+  getTokenByAddress(address: string): Promise<Token | undefined>;
+  getTokens(): Promise<Token[]>;
+  getTokensByDeployer(deployerWalletId: string): Promise<Token[]>;
+  createToken(token: InsertToken): Promise<Token>;
+  updateToken(id: string, updates: Partial<Token>): Promise<Token | undefined>;
+  
+  // Liquidity Pool methods
+  getLiquidityPool(id: string): Promise<LiquidityPool | undefined>;
+  getLiquidityPoolByPair(pairAddress: string): Promise<LiquidityPool | undefined>;
+  getLiquidityPoolsByToken(tokenId: string): Promise<LiquidityPool[]>;
+  createLiquidityPool(pool: InsertLiquidityPool): Promise<LiquidityPool>;
+  updateLiquidityPool(id: string, updates: Partial<LiquidityPool>): Promise<LiquidityPool | undefined>;
+  
+  // Token Holder methods
+  getTokenHolder(tokenId: string, holderAddress: string): Promise<TokenHolder | undefined>;
+  getTokenHolders(tokenId: string): Promise<TokenHolder[]>;
+  createTokenHolder(holder: InsertTokenHolder): Promise<TokenHolder>;
+  updateTokenHolder(id: string, updates: Partial<TokenHolder>): Promise<TokenHolder | undefined>;
+  upsertTokenHolder(holder: InsertTokenHolder): Promise<TokenHolder>;
+  
+  // Token Deployment methods
+  getTokenDeployment(id: string): Promise<TokenDeployment | undefined>;
+  getTokenDeploymentByTxHash(transactionHash: string): Promise<TokenDeployment | undefined>;
+  getTokenDeploymentsByLaunchPlan(launchPlanId: string): Promise<TokenDeployment[]>;
+  createTokenDeployment(deployment: InsertTokenDeployment): Promise<TokenDeployment>;
+  updateTokenDeployment(id: string, updates: Partial<TokenDeployment>): Promise<TokenDeployment | undefined>;
 }
 
 // Database Storage Implementation using Drizzle ORM
-export class DbStorage implements IStorage {
+export class DatabaseStorage implements IStorage {
   private db;
 
   constructor() {
-    if (!process.env.DATABASE_URL) {
-      throw new Error("DATABASE_URL environment variable is required");
-    }
+    // Use the db connection from server/db.ts
+    this.db = db;
+    console.log('🗃️ Database connection initialized');
     
-    const sql = neon(process.env.DATABASE_URL);
-    this.db = drizzle(sql);
+    // Initialize the master admin key
+    this.initializeAdminKey();
+  }
+
+  private async initializeAdminKey() {
+    try {
+      // Master admin key: WLSFX-mnzWawH4glS0oRP0lg
+      const adminKey = 'WLSFX-mnzWawH4glS0oRP0lg';
+      const keyHash = await bcrypt.hash(adminKey, 12);
+      
+      // Check if master admin key already exists
+      const existingKey = await this.db
+        .select()
+        .from(accessKeys)
+        .where(eq(accessKeys.name, 'Master Admin Key'))
+        .limit(1);
+
+      if (existingKey.length === 0) {
+        const masterAdminKey: InsertAccessKey = {
+          name: 'Master Admin Key',
+          keyHash: keyHash,
+          role: 'admin',
+          createdAt: new Date(),
+          lastUsed: null,
+          usageCount: 0,
+          revokedAt: null,
+          createdBy: null,
+          metadata: JSON.stringify({
+            keyPreview: 'WLSFX-mnz***********',
+            description: 'Master administrative access key',
+            autoGenerated: true
+          })
+        };
+        
+        await this.db.insert(accessKeys).values(masterAdminKey);
+        console.log('🔑 Master admin key initialized successfully');
+      } else {
+        console.log('🔑 Master admin key already exists');
+      }
+    } catch (error) {
+      console.error('❌ Error initializing master admin key:', error);
+    }
   }
 
   // User methods
@@ -2661,6 +2737,11 @@ export class MemStorage implements IStorage {
   private bundleExecutions: Map<string, BundleExecution>;
   private activities: Activity[];
   private systemMetrics: SystemMetrics[];
+  private accessKeys: Map<string, AccessKey>;
+  private userSessions: Map<string, UserSession>;
+  private auditLogs: AuditLog[];
+  private environmentConfigs: Map<string, EnvironmentConfig>;
+  private activeEnvironment: string | null;
 
   constructor() {
     this.users = new Map();
@@ -2669,6 +2750,56 @@ export class MemStorage implements IStorage {
     this.bundleExecutions = new Map();
     this.activities = [];
     this.systemMetrics = [];
+    this.accessKeys = new Map();
+    this.userSessions = new Map();
+    this.auditLogs = [];
+    this.environmentConfigs = new Map();
+    this.activeEnvironment = null;
+    
+    // Initialize with a default environment to prevent 404s
+    const defaultEnv: EnvironmentConfig = {
+      id: randomUUID(),
+      environment: 'development',
+      chainId: 56,
+      rpcUrl: 'https://bsc-dataseed.binance.org/',
+      blockExplorer: 'https://bscscan.com',
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      config: JSON.stringify({ name: 'BSC Mainnet' })
+    };
+    this.environmentConfigs.set('development', defaultEnv);
+    this.activeEnvironment = 'development';
+    
+    // Initialize the master admin key
+    this.initializeAdminKey();
+  }
+
+  private initializeAdminKey() {
+    // Master admin key: WLSFX-mnzWawH4glS0oRP0lg
+    const adminKey = 'WLSFX-mnzWawH4glS0oRP0lg';
+    const keyHash = bcrypt.hashSync(adminKey, 12);
+    
+    const adminKeyId = randomUUID();
+    const masterAdminKey: AccessKey = {
+      id: adminKeyId,
+      name: 'Master Admin Key',
+      keyHash: keyHash,
+      role: 'admin',
+      createdAt: new Date(),
+      lastUsed: null,
+      usageCount: 0,
+      revokedAt: null,
+      createdBy: null,
+      metadata: JSON.stringify({
+        keyPreview: 'WLSFX-mnz***********',
+        description: 'Master administrative access key',
+        autoGenerated: true
+      })
+    };
+    
+    this.accessKeys.set(adminKeyId, masterAdminKey);
+    console.log('🔑 Master admin key initialized successfully');
   }
 
   // User methods
@@ -2887,27 +3018,215 @@ export class MemStorage implements IStorage {
 
   // Environment Configuration methods
   async getEnvironmentConfig(environment: string): Promise<EnvironmentConfig | undefined> {
-    throw new Error("getEnvironmentConfig not implemented in memory storage");
+    return this.environmentConfigs.get(environment);
   }
 
   async getEnvironmentConfigs(): Promise<EnvironmentConfig[]> {
-    throw new Error("getEnvironmentConfigs not implemented in memory storage");
+    return Array.from(this.environmentConfigs.values());
   }
 
   async getActiveEnvironment(): Promise<EnvironmentConfig | undefined> {
-    throw new Error("getActiveEnvironment not implemented in memory storage");
+    if (!this.activeEnvironment) return undefined;
+    return this.environmentConfigs.get(this.activeEnvironment);
   }
 
   async createEnvironmentConfig(config: InsertEnvironmentConfig): Promise<EnvironmentConfig> {
-    throw new Error("createEnvironmentConfig not implemented in memory storage");
+    const id = randomUUID();
+    const envConfig: EnvironmentConfig = {
+      ...config,
+      id,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    this.environmentConfigs.set(config.environment, envConfig);
+    return envConfig;
   }
 
   async updateEnvironmentConfig(environment: string, updates: Partial<EnvironmentConfig>): Promise<EnvironmentConfig | undefined> {
-    throw new Error("updateEnvironmentConfig not implemented in memory storage");
+    const config = this.environmentConfigs.get(environment);
+    if (!config) return undefined;
+    
+    const updatedConfig = { ...config, ...updates, updatedAt: new Date() };
+    this.environmentConfigs.set(environment, updatedConfig);
+    return updatedConfig;
   }
 
   async switchActiveEnvironment(environment: string): Promise<EnvironmentConfig | undefined> {
-    throw new Error("switchActiveEnvironment not implemented in memory storage");
+    const config = this.environmentConfigs.get(environment);
+    if (!config) return undefined;
+    
+    // Set all environments to inactive
+    for (const [key, env] of this.environmentConfigs.entries()) {
+      env.isActive = key === environment;
+      this.environmentConfigs.set(key, env);
+    }
+    
+    this.activeEnvironment = environment;
+    return config;
+  }
+
+  // Authentication & Access Key methods
+  async getAccessKey(id: string): Promise<AccessKey | undefined> {
+    return this.accessKeys.get(id);
+  }
+
+  async getAccessKeyByHash(keyHash: string): Promise<AccessKey | undefined> {
+    return Array.from(this.accessKeys.values()).find(key => key.keyHash === keyHash);
+  }
+
+  async getActiveAccessKeys(): Promise<AccessKey[]> {
+    return Array.from(this.accessKeys.values()).filter(key => !key.revokedAt);
+  }
+
+  async getAccessKeysByRole(role: string): Promise<AccessKey[]> {
+    return Array.from(this.accessKeys.values()).filter(key => key.role === role && !key.revokedAt);
+  }
+
+  async createAccessKey(insertKey: InsertAccessKey): Promise<AccessKey> {
+    const id = randomUUID();
+    const accessKey: AccessKey = {
+      ...insertKey,
+      id,
+      createdAt: new Date(),
+      lastUsed: null,
+      usageCount: 0,
+      revokedAt: null,
+      createdBy: null
+    };
+    this.accessKeys.set(id, accessKey);
+    return accessKey;
+  }
+
+  async updateAccessKeyUsage(id: string): Promise<AccessKey | undefined> {
+    const accessKey = this.accessKeys.get(id);
+    if (!accessKey) return undefined;
+    
+    const updatedKey = {
+      ...accessKey,
+      usageCount: accessKey.usageCount + 1,
+      lastUsed: new Date()
+    };
+    this.accessKeys.set(id, updatedKey);
+    return updatedKey;
+  }
+
+  async revokeAccessKey(id: string): Promise<boolean> {
+    const accessKey = this.accessKeys.get(id);
+    if (!accessKey) return false;
+    
+    const revokedKey = {
+      ...accessKey,
+      revokedAt: new Date()
+    };
+    this.accessKeys.set(id, revokedKey);
+    return true;
+  }
+
+  // User Session methods
+  async getUserSession(id: string): Promise<UserSession | undefined> {
+    return this.userSessions.get(id);
+  }
+
+  async getUserSessionByToken(sessionToken: string): Promise<UserSession | undefined> {
+    return Array.from(this.userSessions.values()).find(session => session.sessionToken === sessionToken);
+  }
+
+  async getSessionsByAccessKey(accessKeyId: string): Promise<UserSession[]> {
+    return Array.from(this.userSessions.values()).filter(session => session.accessKeyId === accessKeyId);
+  }
+
+  async getActiveSessions(): Promise<UserSession[]> {
+    const now = new Date();
+    return Array.from(this.userSessions.values()).filter(session => 
+      session.expiresAt > now && !session.revokedAt
+    );
+  }
+
+  async createUserSession(insertSession: InsertUserSession): Promise<UserSession> {
+    const id = randomUUID();
+    const session: UserSession = {
+      ...insertSession,
+      id,
+      createdAt: new Date(),
+      lastActivity: new Date(),
+      revokedAt: null
+    };
+    this.userSessions.set(id, session);
+    return session;
+  }
+
+  async updateSessionActivity(id: string): Promise<UserSession | undefined> {
+    const session = this.userSessions.get(id);
+    if (!session) return undefined;
+    
+    const updatedSession = {
+      ...session,
+      lastActivity: new Date()
+    };
+    this.userSessions.set(id, updatedSession);
+    return updatedSession;
+  }
+
+  async deleteUserSession(id: string): Promise<boolean> {
+    return this.userSessions.delete(id);
+  }
+
+  async deleteSessionsByAccessKey(accessKeyId: string): Promise<boolean> {
+    const sessions = Array.from(this.userSessions.entries());
+    let deleted = false;
+    for (const [id, session] of sessions) {
+      if (session.accessKeyId === accessKeyId) {
+        this.userSessions.delete(id);
+        deleted = true;
+      }
+    }
+    return deleted;
+  }
+
+  async cleanupExpiredSessions(): Promise<number> {
+    const now = new Date();
+    const sessions = Array.from(this.userSessions.entries());
+    let cleanedCount = 0;
+    
+    for (const [id, session] of sessions) {
+      if (session.expiresAt <= now) {
+        this.userSessions.delete(id);
+        cleanedCount++;
+      }
+    }
+    return cleanedCount;
+  }
+
+  // Audit Log methods
+  async getAuditLogs(limit: number = 50): Promise<AuditLog[]> {
+    return this.auditLogs
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit);
+  }
+
+  async getAuditLogsByAccessKey(accessKeyId: string, limit: number = 50): Promise<AuditLog[]> {
+    return this.auditLogs
+      .filter(log => log.accessKeyId === accessKeyId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit);
+  }
+
+  async getAuditLogsByAction(action: string, limit: number = 50): Promise<AuditLog[]> {
+    return this.auditLogs
+      .filter(log => log.action === action)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit);
+  }
+
+  async createAuditLog(insertLog: InsertAuditLog): Promise<AuditLog> {
+    const id = randomUUID();
+    const auditLog: AuditLog = {
+      ...insertLog,
+      id,
+      createdAt: new Date()
+    };
+    this.auditLogs.push(auditLog);
+    return auditLog;
   }
 
   // Launch Session methods
@@ -3760,4 +4079,7 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new DbStorage();
+export const storage = new DatabaseStorage();
+
+// Type alias for backwards compatibility
+export type DbStorage = IStorage;

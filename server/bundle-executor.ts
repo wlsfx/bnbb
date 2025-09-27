@@ -448,6 +448,18 @@ export class BundleExecutor extends EventEmitter {
     // Update real-time progress
     await this.updateRealTimeProgress(job.bundleExecutionId);
     
+    // Broadcast WebSocket update
+    const webSocketService = (global as any).webSocketService;
+    if (webSocketService) {
+      webSocketService.broadcastBundleExecutionUpdate({
+        bundleExecutionId: job.bundleExecutionId,
+        status: 'transaction_completed',
+        walletAddress: job.wallet.address,
+        transactionHash: result.transactionResult?.hash,
+        progress: await this.getBundleProgress(job.bundleExecutionId),
+      });
+    }
+    
     this.emit('transactionCompleted', {
       bundleExecutionId: job.bundleExecutionId,
       walletAddress: job.wallet.address,
@@ -461,6 +473,18 @@ export class BundleExecutor extends EventEmitter {
 
     // Update real-time progress
     await this.updateRealTimeProgress(job.bundleExecutionId);
+    
+    // Broadcast WebSocket error
+    const webSocketService = (global as any).webSocketService;
+    if (webSocketService) {
+      webSocketService.broadcastBundleExecutionUpdate({
+        bundleExecutionId: job.bundleExecutionId,
+        status: 'transaction_failed',
+        walletAddress: job.wallet.address,
+        error,
+        progress: await this.getBundleProgress(job.bundleExecutionId),
+      });
+    }
     
     this.emit('transactionFailed', {
       bundleExecutionId: job.bundleExecutionId,

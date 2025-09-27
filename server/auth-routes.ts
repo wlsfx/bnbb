@@ -4,15 +4,13 @@ import type { DbStorage } from './storage';
 import { z } from 'zod';
 
 // Extend Request type to include auth info
-declare global {
-  namespace Express {
-    interface Request {
-      session?: {
-        accessKeyId?: string;
-        role?: string;
-        sessionToken?: string;
-      };
-    }
+declare module 'express-serve-static-core' {
+  interface Request {
+    session?: {
+      accessKeyId?: string;
+      role?: string;
+      sessionToken?: string;
+    };
   }
 }
 
@@ -95,6 +93,14 @@ export function createAuthRoutes(storage: DbStorage, authService: AuthService) {
         sessionToken
       };
       
+      // Set session token as a cookie (Replit-friendly settings)
+      res.cookie('sessionToken', sessionToken, {
+        httpOnly: false, // Allow frontend access for debugging
+        secure: false, // Disable secure for Replit development
+        sameSite: 'none', // Allow cross-origin cookies  
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+      });
+      
       res.json({
         success: true,
         sessionToken,
@@ -114,7 +120,9 @@ export function createAuthRoutes(storage: DbStorage, authService: AuthService) {
   // Public route: Logout
   router.post('/api/auth/logout', async (req: Request, res: Response) => {
     try {
-      const sessionToken = req.session?.sessionToken || req.headers.authorization?.replace('Bearer ', '');
+      const sessionToken = req.session?.sessionToken || 
+                          req.headers.authorization?.replace('Bearer ', '') ||
+                          req.cookies?.sessionToken;
       
       if (sessionToken) {
         const session = await storage.getUserSessionByToken(sessionToken);
@@ -131,6 +139,10 @@ export function createAuthRoutes(storage: DbStorage, authService: AuthService) {
       }
       
       req.session = undefined;
+      
+      // Clear the session cookie
+      res.clearCookie('sessionToken');
+      
       res.json({ success: true, message: 'Logged out successfully' });
       
     } catch (error) {
@@ -160,7 +172,7 @@ export function createAuthRoutes(storage: DbStorage, authService: AuthService) {
           revokedAt: key.revokedAt,
           metadata: {
             ...metadata,
-            keyPreview: metadata.keyPreview || key.name.substring(0, 4) + '****' + key.name.substring(key.name.length - 4)
+            keyPreview: metadata.keyPreview || 'Preview not available'
           }
         };
       });
@@ -225,6 +237,73 @@ export function createAuthRoutes(storage: DbStorage, authService: AuthService) {
       res.status(400).json({
         success: false,
         message: error instanceof z.ZodError ? 'Invalid request data' : 'Failed to create access key'
+      });
+    }
+  });
+
+  // Admin route: Get detailed access key information (secure alternative to full key reveal)
+  router.get('/api/admin/access-keys/:id/details', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const keyId = req.params.id;
+      
+      // Get the access key
+      const accessKey = await storage.getAccessKey(keyId);
+      if (!accessKey) {
+        return res.status(404).json({
+          success: false,
+          message: 'Access key not found'
+        });
+      }
+
+      // Get related sessions
+      const sessions = await storage.getSessionsByAccessKey(keyId);
+      
+      // Get audit logs for this key (last 50 entries)
+      const auditLogs = await storage.getAuditLogsByAccessKey(keyId, 50);
+      
+      // Parse metadata
+      const metadata = accessKey.metadata ? JSON.parse(accessKey.metadata as string) : {};
+      
+      // Log the access attempt
+      await storage.createAuditLog({
+        action: 'key_details_accessed',
+        accessKeyId: req.session?.accessKeyId,
+        ipAddress: req.ip || 'unknown',
+        userAgent: req.headers['user-agent'] || 'unknown',
+        details: JSON.stringify({ 
+          viewedKeyId: keyId,
+          viewedKeyName: accessKey.name,
+          viewedKeyRole: accessKey.role
+        })
+      });
+
+      // Return detailed information (but not the actual key)
+      res.json({
+        success: true,
+        keyDetails: {
+          id: accessKey.id,
+          name: accessKey.name,
+          role: accessKey.role,
+          createdAt: accessKey.createdAt,
+          lastUsed: accessKey.lastUsed,
+          usageCount: accessKey.usageCount,
+          revokedAt: accessKey.revokedAt,
+          createdBy: accessKey.createdBy,
+          metadata: {
+            ...metadata,
+            securityNote: 'Original access key cannot be retrieved for security reasons. Key is securely hashed.'
+          },
+          activeSessions: sessions.filter(s => s.expiresAt > new Date()).length,
+          totalSessions: sessions.length,
+          recentAuditLogs: auditLogs
+        }
+      });
+      
+    } catch (error) {
+      console.error('Failed to get access key details:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to retrieve access key details'
       });
     }
   });
@@ -320,7 +399,11 @@ export function createAuthRoutes(storage: DbStorage, authService: AuthService) {
   // Middleware: Require authentication
   async function requireAuth(req: Request, res: Response, next: Function) {
     try {
-      const sessionToken = req.session?.sessionToken || req.headers.authorization?.replace('Bearer ', '');
+      const sessionToken = req.session?.sessionToken || 
+                          req.headers.authorization?.replace('Bearer ', '') || 
+                          req.headers['x-session-token'] ||
+                          req.cookies?.sessionToken;
+      
       
       if (!sessionToken) {
         return res.status(401).json({

@@ -64,6 +64,72 @@ export const wallets = pgTable("wallets", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// BEP-20 Token table
+export const tokens = pgTable("tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  address: text("address").notNull().unique(),
+  name: text("name").notNull(),
+  symbol: text("symbol").notNull(),
+  decimals: integer("decimals").notNull().default(18),
+  totalSupply: decimal("total_supply", { precision: 36, scale: 0 }).notNull(),
+  deployerWalletId: varchar("deployer_wallet_id").references(() => wallets.id),
+  deploymentTxHash: text("deployment_tx_hash").notNull(),
+  contractAbi: text("contract_abi").notNull(), // JSON string of contract ABI
+  contractBytecode: text("contract_bytecode"), // Bytecode if needed for verification
+  status: text("status").notNull().default("deployed"), // deployed, verified, active, paused
+  chainId: integer("chain_id").notNull().default(97), // BSC testnet by default
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// Liquidity pool information
+export const liquidityPools = pgTable("liquidity_pools", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tokenId: varchar("token_id").notNull().references(() => tokens.id),
+  pairAddress: text("pair_address").notNull().unique(),
+  routerAddress: text("router_address").notNull(), // PancakeSwap router
+  factoryAddress: text("factory_address").notNull(), // PancakeSwap factory
+  token0: text("token0").notNull(), // First token in pair (usually WBNB)
+  token1: text("token1").notNull(), // Second token in pair (our token)
+  reserve0: decimal("reserve0", { precision: 36, scale: 18 }),
+  reserve1: decimal("reserve1", { precision: 36, scale: 18 }),
+  lpTokenSupply: decimal("lp_token_supply", { precision: 36, scale: 18 }),
+  creationTxHash: text("creation_tx_hash").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// Token holders tracking
+export const tokenHolders = pgTable("token_holders", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tokenId: varchar("token_id").notNull().references(() => tokens.id),
+  holderAddress: text("holder_address").notNull(),
+  balance: decimal("balance", { precision: 36, scale: 18 }).notNull(),
+  percentage: decimal("percentage", { precision: 5, scale: 2 }), // Percentage of total supply
+  firstTxHash: text("first_tx_hash"),
+  lastTxHash: text("last_tx_hash"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  unq: unique().on(table.tokenId, table.holderAddress),
+}));
+
+// Token deployment transactions tracking
+export const tokenDeployments = pgTable("token_deployments", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  launchPlanId: varchar("launch_plan_id").references(() => launchPlans.id),
+  tokenId: varchar("token_id").references(() => tokens.id),
+  walletId: varchar("wallet_id").notNull().references(() => wallets.id),
+  transactionHash: text("transaction_hash").notNull().unique(),
+  gasUsed: decimal("gas_used", { precision: 18, scale: 0 }),
+  gasPrice: decimal("gas_price", { precision: 18, scale: 0 }),
+  status: text("status").notNull().default("pending"), // pending, confirmed, failed
+  errorMessage: text("error_message"),
+  blockNumber: integer("block_number"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+});
+
 export const launchPlans = pgTable("launch_plans", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
@@ -73,6 +139,8 @@ export const launchPlans = pgTable("launch_plans", {
   initialLiquidity: decimal("initial_liquidity", { precision: 18, scale: 8 }).notNull(),
   status: text("status").notNull().default("draft"), // draft, ready, executing, completed, failed
   walletCount: integer("wallet_count").notNull(),
+  tokenId: varchar("token_id").references(() => tokens.id), // Reference to deployed token
+  liquidityPoolId: varchar("liquidity_pool_id").references(() => liquidityPools.id), // Reference to liquidity pool
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -307,7 +375,7 @@ export const environmentConfig = pgTable("environment_config", {
   explorerUrl: text("explorer_url"),
   nativeCurrency: text("native_currency").notNull().default("BNB"),
   gasLimitMultiplier: decimal("gas_limit_multiplier", { precision: 3, scale: 2 }).notNull().default("1.20"),
-  maxGasPrice: decimal("max_gas_price", { precision: 18, scale: 9 }).notNull(),
+  maxGasPrice: decimal("max_gas_price", { precision: 20, scale: 9 }).notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -784,6 +852,44 @@ export type PnLAlert = typeof pnlAlerts.$inferSelect;
 
 export type InsertMarketDataCache = z.infer<typeof insertMarketDataCacheSchema>;
 export type MarketDataCache = typeof marketDataCache.$inferSelect;
+
+// Token-related insert schemas
+export const insertTokenSchema = createInsertSchema(tokens).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertLiquidityPoolSchema = createInsertSchema(liquidityPools).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertTokenHolderSchema = createInsertSchema(tokenHolders).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertTokenDeploymentSchema = createInsertSchema(tokenDeployments).omit({
+  id: true,
+  createdAt: true,
+  completedAt: true,
+});
+
+// Token types
+export type InsertToken = z.infer<typeof insertTokenSchema>;
+export type Token = typeof tokens.$inferSelect;
+
+export type InsertLiquidityPool = z.infer<typeof insertLiquidityPoolSchema>;
+export type LiquidityPool = typeof liquidityPools.$inferSelect;
+
+export type InsertTokenHolder = z.infer<typeof insertTokenHolderSchema>;
+export type TokenHolder = typeof tokenHolders.$inferSelect;
+
+export type InsertTokenDeployment = z.infer<typeof insertTokenDeploymentSchema>;
+export type TokenDeployment = typeof tokenDeployments.$inferSelect;
 
 // Wallet Pool Management types
 export const insertWalletPoolSchema = createInsertSchema(walletPools).omit({

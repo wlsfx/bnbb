@@ -112,7 +112,14 @@ export function securityHeaders(req: Request, res: Response, next: NextFunction)
 }
 
 // Encryption utilities for private keys
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+// Use WALLET_ENCRYPTION_KEY for consistency, with development fallback
+const ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY || 
+  '582710df0ebb9d793ff28e6aa7239eb9200b487a7360af2932d0654c29e086d6';
+
+if (!process.env.WALLET_ENCRYPTION_KEY) {
+  console.warn('⚠️  WALLET_ENCRYPTION_KEY not set, using default development key');
+}
+
 const IV_LENGTH = 16;
 const ALGORITHM = 'aes-256-cbc';
 
