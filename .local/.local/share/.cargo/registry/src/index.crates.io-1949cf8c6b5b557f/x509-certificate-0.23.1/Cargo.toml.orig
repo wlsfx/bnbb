@@ -1,0 +1,28 @@
+[package]
+name = "x509-certificate"
+version = "0.23.1"
+authors = ["Gregory Szorc <gregory.szorc@gmail.com>"]
+edition = "2021"
+rust-version = "1.65"
+license = "MPL-2.0"
+description = "X.509 certificate parser and utility functionality"
+keywords = ["x509", "cryptography", "pki"]
+homepage = "https://github.com/indygreg/cryptography-rs"
+repository = "https://github.com/indygreg/cryptography-rs.git"
+readme = "README.md"
+
+[features]
+test = []
+
+[dependencies]
+bcder = "0.7.3"
+bytes = "1.5.0"
+chrono = { version = "0.4.31", default-features = false, features = ["clock"] }
+der = { version = "0.7.8", features = ["alloc", "zeroize"] }
+hex = "0.4.3"
+pem = "3.0.2"
+ring = "0.17.5"
+signature = { version = "2.1.0", features = ["std"] }
+spki = { version = "0.7.2", features = ["alloc"] }
+thiserror = "1.0.50"
+zeroize = { version = "1.6.0", features = ["derive"] }
